@@ -1,154 +1,147 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { corsHeaders } from '../_shared/cors.ts';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
+interface WhatsAppIntegration {
+  api_url: string;
+}
 
-serve(async (req) => {
-  // Handle CORS preflight requests
+Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    // Ler os parâmetros do body da requisição
-    const { action, tenantId, serverUrl } = await req.json();
+    const { tenant_id, action } = await req.json();
+    console.log('🔍 Proxy request:', { tenant_id, action });
 
-    console.log('📥 Received params:', { action, tenantId, serverUrl });
+    // Get WhatsApp API URL from database
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
-    if (!tenantId || !serverUrl) {
-      console.error('❌ Missing required params');
-      return new Response(
-        JSON.stringify({ error: 'Missing tenantId or serverUrl' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    let targetUrl = '';
-    
-    if (action === 'qr') {
-      targetUrl = `${serverUrl}/qr/${tenantId}`;
-    } else if (action === 'status') {
-      targetUrl = `${serverUrl}/status/${tenantId}`;
-    } else {
-      return new Response(
-        JSON.stringify({ error: 'Invalid action. Use "qr" or "status"' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    console.log('🔄 Proxying request to:', targetUrl);
-
-    const response = await fetch(targetUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Supabase-Edge-Function',
-      },
-    });
-
-    console.log('📡 Response status:', response.status);
-    
-    const contentType = response.headers.get('content-type') || '';
-    console.log('📄 Content-Type:', contentType);
-
-    if (!response.ok) {
-      return new Response(
-        JSON.stringify({ 
-          error: `Server responded with ${response.status}`,
-          status: response.status
-        }),
-        { 
-          status: response.status, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
-    }
-
-    // Se for HTML (página do QR), tentar extrair o QR code
-    if (contentType.includes('text/html')) {
-      const html = await response.text();
-      console.log('📄 HTML length:', html.length);
-      console.log('📄 HTML sample:', html.substring(0, 1000));
-      
-      // Tentar extrair o QR code da imagem (suporta vários formatos)
-      const imgMatch = html.match(/<img[^>]+src="([^"]+)"[^>]*>/) || 
-                       html.match(/src="([^"]*data:image[^"]+)"/);
-      
-      const statusMatch = html.match(/<h1[^>]*>([^<]+)<\/h1>/) ||
-                         html.match(/<div[^>]*class="status"[^>]*>([^<]+)<\/div>/);
-      
-      console.log('🔍 Image match:', imgMatch ? 'Found' : 'Not found');
-      console.log('🔍 Status match:', statusMatch ? statusMatch[1] : 'Not found');
-      
-      if (imgMatch && imgMatch[1]) {
-        const qrCode = imgMatch[1];
-        console.log('✅ QR Code extracted, length:', qrCode.length);
-        console.log('🎯 QR Code preview:', qrCode.substring(0, 100));
-        
-        return new Response(
-          JSON.stringify({
-            qrCode: qrCode,
-            message: statusMatch ? statusMatch[1] : 'Escaneie o QR Code',
-            source: 'html'
-          }),
-          { 
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          }
-        );
-      } else {
-        console.error('❌ No QR Code found in HTML');
-        console.error('🔍 HTML structure:', html.substring(0, 2000));
-        
-        return new Response(
-          JSON.stringify({
-            error: 'QR Code not found in HTML',
-            message: 'O servidor retornou HTML mas não foi possível extrair o QR Code',
-            htmlPreview: html.substring(0, 1500)
-          }),
-          { 
-            status: 404,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          }
-        );
+    const response = await fetch(
+      `${supabaseUrl}/rest/v1/integration_whatsapp?tenant_id=eq.${tenant_id}&select=api_url`,
+      {
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+        },
       }
-    }
+    );
+
+    const integrations = await response.json() as WhatsAppIntegration[];
     
-    // Se for JSON, retornar direto
-    if (contentType.includes('application/json')) {
-      const data = await response.json();
-      console.log('📊 JSON response:', data);
-      
+    if (!integrations || integrations.length === 0) {
+      console.error('❌ No WhatsApp integration found for tenant:', tenant_id);
       return new Response(
-        JSON.stringify(data),
+        JSON.stringify({ error: 'WhatsApp integration not configured' }),
         { 
+          status: 404, 
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         }
       );
     }
 
-    // Se for outro tipo de conteúdo
-    const text = await response.text();
+    const apiUrl = integrations[0].api_url;
+    console.log('📡 Forwarding to WhatsApp server:', apiUrl);
+
+    // Make request to WhatsApp server
+    const whatsappResponse = await fetch(apiUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'text/html,application/json',
+      },
+    });
+
+    console.log('📡 Response status:', whatsappResponse.status);
+    console.log('📄 Content-Type:', whatsappResponse.headers.get('content-type'));
+
+    const contentType = whatsappResponse.headers.get('content-type') || '';
+    
+    if (contentType.includes('application/json')) {
+      const jsonData = await whatsappResponse.json();
+      console.log('✅ JSON response:', jsonData);
+      return new Response(JSON.stringify(jsonData), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // If HTML, extract QR code or status
+    const html = await whatsappResponse.text();
+    console.log('📄 HTML length:', html.length);
+    console.log('📄 HTML sample:', html.substring(0, 500));
+
+    // Check if WhatsApp is already connected
+    if (html.includes('✅ Conectado') || (html.includes('Status: online') && html.includes('Conectado'))) {
+      console.log('✅ WhatsApp is already connected');
+      return new Response(
+        JSON.stringify({
+          success: true,
+          connected: true,
+          status: 'connected',
+          message: 'WhatsApp está conectado'
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Try to extract QR code
+    const imgMatch = html.match(/<img[^>]+src=["']([^"']+)["'][^>]*>/i);
+    console.log('🔍 Image match:', imgMatch ? 'Found' : 'Not found');
+
+    if (imgMatch && imgMatch[1]) {
+      const qrCode = imgMatch[1];
+      console.log('✅ QR Code found, length:', qrCode.length);
+      console.log('📸 QR Code preview:', qrCode.substring(0, 100));
+      
+      return new Response(
+        JSON.stringify({
+          success: true,
+          qrCode,
+          message: 'QR Code gerado com sucesso'
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Check for status without QR code
+    const statusMatch = html.match(/<h1[^>]*>(.*?)<\/h1>/i);
+    console.log('🔍 Status match:', statusMatch ? statusMatch[1] : 'Not found');
+
+    if (statusMatch) {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          status: statusMatch[1],
+          message: 'Aguardando QR Code...'
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // No QR code or recognizable status found
+    console.error('❌ No QR Code found in HTML');
+    console.error('🔍 HTML structure:', html.substring(0, 1000));
+    
     return new Response(
       JSON.stringify({
-        contentType,
-        data: text.substring(0, 1000)
+        error: 'Could not extract QR Code from response',
+        htmlPreview: html.substring(0, 200)
       }),
       { 
+        status: 500, 
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       }
     );
 
-  } catch (error: any) {
+  } catch (error) {
     console.error('❌ Proxy error:', error);
     return new Response(
       JSON.stringify({ 
-        error: error.message || 'Internal server error',
-        details: error.toString()
+        error: error.message,
+        details: 'Failed to proxy request to WhatsApp server'
       }),
       { 
         status: 500, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       }
     );
   }
