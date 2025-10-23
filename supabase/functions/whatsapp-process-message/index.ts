@@ -10,6 +10,7 @@ interface ProcessMessageRequest {
   customer_phone: string;
   message: string;
   group_name?: string;
+  bot_phone?: string;
 }
 
 Deno.serve(async (req) => {
@@ -23,14 +24,26 @@ Deno.serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     const body: ProcessMessageRequest = await req.json();
-    const { tenant_id, customer_phone, message, group_name } = body;
+    const { tenant_id, customer_phone, message, group_name, bot_phone } = body;
 
     console.log('\n🔄 ===== PROCESSANDO MENSAGEM WHATSAPP =====');
     console.log('🏢 Tenant:', tenant_id);
-    console.log('📱 Telefone RECEBIDO:', customer_phone);
+    console.log('📱 Telefone RECEBIDO (original):', customer_phone);
     console.log('💬 Mensagem:', message);
     if (group_name) {
       console.log('👥 Grupo WhatsApp:', group_name);
+    }
+    if (bot_phone) {
+      console.log('🤖 Bot Phone:', bot_phone);
+    }
+
+    // Verificar se é o número do bot (não processar vendas do próprio bot)
+    if (bot_phone && customer_phone.includes(bot_phone)) {
+      console.log('⚠️ Número do bot detectado - IGNORANDO processamento');
+      return new Response(
+        JSON.stringify({ message: 'Número do bot - não processado' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
     // Detectar códigos de produtos (C seguido de números)
@@ -52,53 +65,66 @@ Deno.serve(async (req) => {
 
     console.log('✅ Códigos detectados:', codes);
 
-    // Normalizar telefone brasileiro com regra do nono dígito
-    function normalizePhoneBrazil(phone: string): string {
+    // Função para normalizar telefone SOMENTE para envio no WhatsApp
+    function normalizePhoneForWhatsApp(phone: string): string {
       // Remover tudo que não é número
       let clean = phone.replace(/\D/g, '');
       
-      // Remover código do país se tiver
+      console.log(`🔍 Telefone original (limpo): ${clean} (${clean.length} dígitos)`);
+      
+      // Remover código do país (55) se tiver
+      if (clean.startsWith('55')) {
+        clean = clean.substring(2);
+        console.log(`✂️ Removido DDI 55: ${clean}`);
+      }
+      
+      // Validar tamanho
+      if (clean.length < 10 || clean.length > 11) {
+        console.warn(`⚠️ Telefone com tamanho inválido: ${clean.length} dígitos`);
+        return '55' + clean;
+      }
+      
+      const ddd = parseInt(clean.substring(0, 2));
+      
+      // Validar DDD
+      if (ddd < 11 || ddd > 99) {
+        console.warn('⚠️ DDD inválido:', ddd);
+        return '55' + clean;
+      }
+      
+      // Garantir 9º dígito para celulares
+      if (clean.length === 10 && clean[2] === '9') {
+        clean = clean.substring(0, 2) + '9' + clean.substring(2);
+        console.log('✅ 9º dígito adicionado para celular:', clean);
+      } else if (clean.length === 10 && clean[2] !== '9') {
+        clean = clean.substring(0, 2) + '9' + clean.substring(2);
+        console.log('✅ 9º dígito adicionado:', clean);
+      }
+      
+      // Adicionar DDI 55
+      return '55' + clean;
+    }
+
+    // Limpar apenas caracteres não numéricos para armazenamento
+    function cleanPhoneForStorage(phone: string): string {
+      let clean = phone.replace(/\D/g, '');
+      
+      // Remover DDI 55 se presente (armazena sem DDI)
       if (clean.startsWith('55')) {
         clean = clean.substring(2);
       }
       
-      // Validar tamanho mínimo
-      if (clean.length < 10) {
-        console.warn(`⚠️ Telefone muito curto: ${phone} -> ${clean}`);
-        return clean;
-      }
-      
-      // Extrair DDD (2 dígitos) e número
-      const ddd = parseInt(clean.substring(0, 2));
-      let number = clean.substring(2);
-      
-      console.log(`📞 Normalizando: DDD=${ddd}, Número=${number} (${number.length} dígitos)`);
-      
-      if (ddd >= 31) {
-        // DDD >= 31 (SP, MG, Sul, etc): REMOVER o 9º dígito se tiver
-        if (number.length === 9 && number.startsWith('9')) {
-          number = number.substring(1);
-          console.log(`✂️ DDD ${ddd} >= 31: Removendo 9º dígito -> ${number}`);
-        }
-      } else {
-        // DDD <= 30 (Norte, Nordeste): ADICIONAR o 9º dígito se não tiver
-        if (number.length === 8) {
-          number = '9' + number;
-          console.log(`➕ DDD ${ddd} <= 30: Adicionando 9º dígito -> ${number}`);
-        }
-      }
-      
-      const final = `${ddd}${number}`;
-      console.log(`✅ Telefone normalizado: ${final}`);
-      return final;
+      return clean;
     }
 
-    const phoneNormalized = normalizePhoneBrazil(customer_phone);
+    const phoneForStorage = cleanPhoneForStorage(customer_phone);
+    const phoneForWhatsApp = normalizePhoneForWhatsApp(customer_phone);
     
-    console.log('\n📞 ===== NORMALIZAÇÃO DE TELEFONE =====');
-    console.log('📥 Telefone original:', customer_phone);
-    console.log('📤 Telefone normalizado:', phoneNormalized);
-    console.log('===== FIM NORMALIZAÇÃO =====\n');
+    console.log('\n📞 ===== TELEFONES =====');
+    console.log('📥 Original:', customer_phone);
+    console.log('💾 Para armazenar (sem normalizar):', phoneForStorage);
+    console.log('📤 Para enviar WhatsApp (normalizado):', phoneForWhatsApp);
+    console.log('===== FIM =====\n');
 
     // Data de hoje
     const today = new Date().toISOString().split('T')[0];
@@ -141,7 +167,7 @@ Deno.serve(async (req) => {
       // IMPORTANTE: Filtrar apenas BAZAR e MANUAL, excluir LIVE
       console.log('\n🔎 ===== BUSCANDO PEDIDO EXISTENTE =====');
       console.log('📋 Tenant ID:', tenant_id);
-      console.log('📋 Telefone normalizado:', phoneNormalized);
+      console.log('📋 Telefone para buscar:', phoneForStorage);
       console.log('📋 Data:', today);
       console.log('📋 Tipos aceitos: BAZAR, MANUAL');
       console.log('📋 Status: não pago');
@@ -150,7 +176,7 @@ Deno.serve(async (req) => {
         .from('orders')
         .select('*')
         .eq('tenant_id', tenant_id)
-        .eq('customer_phone', phoneNormalized)
+        .eq('customer_phone', phoneForStorage)
         .eq('event_date', today)
         .eq('is_paid', false)
         .in('event_type', ['BAZAR', 'MANUAL'])
@@ -209,7 +235,7 @@ Deno.serve(async (req) => {
           .from('orders')
           .insert([{
             tenant_id,
-            customer_phone: phoneNormalized,
+            customer_phone: phoneForStorage, // Armazenar SEM normalização
             event_type: 'BAZAR',
             event_date: today,
             total_amount: subtotal,
@@ -237,7 +263,7 @@ Deno.serve(async (req) => {
           .from('carts')
           .insert({
             tenant_id,
-            customer_phone: phoneNormalized,
+            customer_phone: phoneForStorage, // Armazenar SEM normalização
             event_type: 'BAZAR',
             event_date: today,
             status: 'OPEN',
@@ -335,7 +361,7 @@ Deno.serve(async (req) => {
         const sendMessageResponse = await supabase.functions.invoke('whatsapp-send-item-added', {
           body: {
             tenant_id,
-            customer_phone: phoneNormalized,
+            customer_phone: phoneForWhatsApp, // Normalizar SOMENTE para envio
             product_name: product.name,
             product_code: product.code,
             quantity: qty,
