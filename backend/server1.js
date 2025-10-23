@@ -351,33 +351,57 @@ class TenantManager {
     const groupName = isGroup ? msg.key.remoteJid : null;
 
     // Obter telefone do remetente
-    // IMPORTANTE: Em grupos, o telefone está em msg.key.participant, não em remoteJid
     let customerPhone;
     
-    console.log(`\n🔍 ===== DEBUG DE IDENTIFICAÇÃO DO CLIENTE =====`);
-    console.log(`📋 RemoteJid completo: ${msg.key.remoteJid}`);
-    console.log(`📋 Participant: ${msg.key.participant || 'N/A'}`);
-    console.log(`📋 É grupo? ${isGroup ? 'SIM' : 'NÃO'}`);
+    console.log(`\n🔍 ===== DEBUG COMPLETO DA MENSAGEM =====`);
+    console.log(`📋 msg.key:`, JSON.stringify(msg.key, null, 2));
+    console.log(`📋 msg.pushName:`, msg.pushName || 'N/A');
+    console.log(`📋 msg.participant:`, msg.participant || 'N/A');
+    console.log(`📋 msg.verifiedBizName:`, msg.verifiedBizName || 'N/A');
     
-    if (isGroup && msg.key.participant) {
-      // MENSAGEM DE GRUPO: usar participant (quem enviou a mensagem)
-      customerPhone = msg.key.participant.split('@')[0];
-      console.log(`\n✅ GRUPO DETECTADO`);
-      console.log(`📊 Nome do grupo: ${groupName}`);
-      console.log(`👤 Telefone do participante (quem comentou): ${customerPhone}`);
-    } else if (isGroup && !msg.key.participant) {
-      // MENSAGEM DE GRUPO SEM PARTICIPANT (caso raro)
-      console.log(`\n⚠️ AVISO: Mensagem de grupo SEM participant - usando remoteJid`);
-      customerPhone = msg.key.remoteJid.split('@')[0];
-      console.log(`👤 Telefone (fallback): ${customerPhone}`);
-    } else {
-      // MENSAGEM INDIVIDUAL: usar remoteJid
-      customerPhone = msg.key.remoteJid.split('@')[0];
-      console.log(`\n✅ MENSAGEM INDIVIDUAL`);
-      console.log(`👤 Telefone do cliente: ${customerPhone}`);
+    // Verificar todos os campos possíveis que podem conter o telefone
+    console.log(`\n🔎 Análise de campos de telefone:`);
+    console.log(`   msg.key.remoteJid: ${msg.key.remoteJid}`);
+    console.log(`   msg.key.participant: ${msg.key.participant || 'N/A'}`);
+    console.log(`   msg.key.fromMe: ${msg.key.fromMe}`);
+    console.log(`   msg.participant: ${msg.participant || 'N/A'}`);
+    
+    // Verificar se tem info do remetente
+    if (msg.message?.extendedTextMessage?.contextInfo) {
+      console.log(`\n📨 Contexto da mensagem encontrado:`);
+      console.log(`   participant: ${msg.message.extendedTextMessage.contextInfo.participant || 'N/A'}`);
     }
     
-    console.log(`\n🔑 TELEFONE FINAL IDENTIFICADO: ${customerPhone}`);
+    // Tentar extrair de diferentes fontes
+    const isGroup = msg.key.remoteJid.endsWith('@g.us');
+    const groupName = isGroup ? msg.key.remoteJid : null;
+    
+    console.log(`\n📊 É grupo? ${isGroup ? 'SIM' : 'NÃO'}`);
+    
+    if (isGroup) {
+      console.log(`\n✅ GRUPO DETECTADO: ${groupName}`);
+      
+      // Tentar diferentes campos para obter o telefone do participante
+      if (msg.key.participant) {
+        customerPhone = msg.key.participant.split('@')[0];
+        console.log(`✓ Usando msg.key.participant: ${customerPhone}`);
+      } else if (msg.participant) {
+        customerPhone = msg.participant.split('@')[0];
+        console.log(`✓ Usando msg.participant: ${customerPhone}`);
+      } else {
+        console.log(`⚠️ AVISO: Nenhum participant encontrado, usando remoteJid como fallback`);
+        customerPhone = msg.key.remoteJid.split('@')[0];
+        console.log(`✓ Usando msg.key.remoteJid (fallback): ${customerPhone}`);
+      }
+    } else {
+      // MENSAGEM INDIVIDUAL
+      customerPhone = msg.key.remoteJid.split('@')[0];
+      console.log(`\n✅ MENSAGEM INDIVIDUAL`);
+      console.log(`✓ Usando msg.key.remoteJid: ${customerPhone}`);
+    }
+    
+    console.log(`\n🔑 TELEFONE FINAL CAPTURADO: ${customerPhone}`);
+    console.log(`📏 Tamanho: ${customerPhone.length} dígitos`);
     console.log(`===== FIM DEBUG DE IDENTIFICAÇÃO =====\n`);
 
     // Processar cada código detectado via Edge Function
@@ -701,46 +725,10 @@ class CartMonitor {
       console.log(`   Produto: ${item.product?.name} (${item.product?.code})`);
       console.log(`   Cliente: ${item.cart?.customer_phone}`);
       console.log(`   Quantidade: ${item.qty}`);
+      console.log(`✅ Item será processado via edge function whatsapp-send-item-added`);
+      console.log(`   (CartMonitor desabilitado - edge function já envia a mensagem)`);
 
-      const sock = this.tenantManager.getOnlineClient(tenantId);
-      if (!sock) {
-        console.log(`⚠️ WhatsApp offline, pulando...`);
-        return;
-      }
-
-      // Buscar template
-      const template = await this.supabaseHelper.getTemplate(tenantId, 'ITEM_ADDED');
-      if (!template) {
-        console.log(`⚠️ Template ITEM_ADDED não encontrado`);
-        return;
-      }
-
-      // Formatar mensagem
-      const valorTotal = (item.qty * item.unit_price).toFixed(2);
-      let mensagem = template.content
-        .replace(/\{\{produto\}\}/g, `${item.product.name} (${item.product.code})`)
-        .replace(/\{\{quantidade\}\}/g, item.qty.toString())
-        .replace(/\{\{valor\}\}/g, valorTotal);
-
-      // Normalizar telefone
-      const phoneClean = item.cart.customer_phone.replace(/\D/g, '');
-      const phoneFinal = phoneClean.startsWith('55') ? phoneClean : `55${phoneClean}`;
-      const phoneFormatted = `${phoneFinal}@s.whatsapp.net`;
-
-      // Enviar mensagem
-      console.log(`📤 Enviando WhatsApp para ${phoneFinal}...`);
-      await sock.sendMessage(phoneFormatted, { text: mensagem });
-      console.log(`✅ Mensagem enviada!`);
-
-      // Logar no banco
-      await this.supabaseHelper.logMessage(
-        tenantId,
-        phoneFinal,
-        mensagem,
-        'item_added'
-      );
-
-      // Marcar como processado
+      // Marcar como processado para evitar reprocessamento
       await this.supabaseHelper.markCartItemProcessed(item.id);
       console.log(`✅ Item marcado como processado\n`);
 
@@ -1317,11 +1305,15 @@ async function main() {
     console.log(`${'='.repeat(70)}\n`);
   });
 
-  // NOVO: Iniciar monitor de carrinho após 5 segundos
-  setTimeout(() => {
-    cartMonitor = new CartMonitor(tenantManager, supabaseHelper);
-    cartMonitor.start();
-  }, 5000);
+  // CartMonitor DESABILITADO - edge function whatsapp-send-item-added já faz o trabalho
+  // setTimeout(() => {
+  //   cartMonitor = new CartMonitor(tenantManager, supabaseHelper);
+  //   cartMonitor.start();
+  // }, 5000);
+  
+  console.log('\n💡 NOTA: CartMonitor desabilitado');
+  console.log('   Mensagens são enviadas via edge function whatsapp-send-item-added');
+  console.log('   que é chamada automaticamente pela whatsapp-process-message\n');
 }
 
 main().catch(error => {
