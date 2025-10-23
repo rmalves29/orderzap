@@ -7,10 +7,10 @@
 
 /**
  * Normaliza número para armazenamento no banco (sem DDI).
- * Armazena EXATAMENTE como digitado, sem ajustar 9º dígito.
+ * Remove apenas formatação e DDI 55, mantém o número EXATAMENTE como digitado.
  * 
- * Entrada: 5531992904210 ou 3193786530 ou (31) 99290-4210
- * Saída: 31992904210 ou 3193786530 (como digitado)
+ * Entrada: 5531992904210 ou (31) 99290-4210 ou 67999583003
+ * Saída: 31992904210 ou 67999583003 (sem DDI, sem formatação)
  */
 export function normalizeForStorage(phone: string): string {
   if (!phone) return phone;
@@ -23,19 +23,21 @@ export function normalizeForStorage(phone: string): string {
     clean = clean.substring(2);
   }
   
+  // Retorna exatamente como está, sem adicionar ou remover dígitos
   return clean;
 }
 
 /**
- * Adiciona DDI 55 e garante que celulares tenham o 9º dígito.
+ * Adiciona DDI 55 para envio via WhatsApp e ajusta 9º dígito baseado no DDD.
  * 
- * Regra do 9º dígito no Brasil:
- * - TODOS os celulares devem ter 9 dígitos após o DDD (total 11 dígitos sem DDI)
- * - Celulares começam com 9 após o DDD
- * - Se tiver 10 dígitos e começar com 9, adiciona outro 9 no início
+ * Regra do 9º dígito:
+ * - DDD ≤ 11 (Norte/Nordeste): Se tiver 10 dígitos → ADICIONA o 9º dígito
+ * - DDD ≥ 31 (Sudeste/Sul/Centro-Oeste): Se tiver 11 dígitos → REMOVE o 9º dígito
  * 
- * Entrada: 31992904210 ou 3192904210 ou 5531992904210
- * Saída: 5531992904210 (sempre com 9º dígito para celulares)
+ * Exemplos:
+ * - 1192904210 (DDD 11, 10 dígitos) → 5511992904210 (adiciona 9)
+ * - 67999583003 (DDD 67, 11 dígitos) → 556799583003 (remove primeiro 9)
+ * - 3192904210 (DDD 31, 10 dígitos) → 5531992904210 (mantém)
  */
 export function normalizeForSending(phone: string): string {
   if (!phone) return phone;
@@ -43,17 +45,18 @@ export function normalizeForSending(phone: string): string {
   // Remove todos os caracteres não numéricos
   let clean = phone.replace(/\D/g, '');
   
-  // Remove DDI 55 se presente
+  // Remove DDI 55 se já presente
   if (clean.startsWith('55')) {
     clean = clean.substring(2);
   }
   
-  // Validação básica
+  // Validação básica de tamanho
   if (clean.length < 10 || clean.length > 11) {
-    console.warn('⚠️ Telefone com tamanho inválido para envio:', phone);
+    console.warn('⚠️ Telefone com tamanho inválido:', phone);
     return '55' + clean;
   }
   
+  // Extrai o DDD
   const ddd = parseInt(clean.substring(0, 2));
   
   // Validar DDD
@@ -62,21 +65,22 @@ export function normalizeForSending(phone: string): string {
     return '55' + clean;
   }
   
-  // Garantir 9º dígito para celulares
-  // Se tem 10 dígitos e o 3º dígito é '9', significa que é celular mas falta o 9º dígito
-  // Exemplo: 3192904210 -> deve virar 31992904210
-  if (clean.length === 10 && clean[2] === '9') {
-    // É um celular (começa com 9) mas tem apenas 10 dígitos - adicionar o 9º dígito
-    clean = clean.substring(0, 2) + '9' + clean.substring(2);
-    console.log('✅ 9º dígito adicionado para celular:', phone, '->', clean);
-  } else if (clean.length === 10 && clean[2] !== '9') {
-    // Número com 10 dígitos que não começa com 9 - pode ser fixo ou celular sem nenhum 9
-    // Assumir que é celular e adicionar o 9
-    clean = clean.substring(0, 2) + '9' + clean.substring(2);
-    console.log('✅ 9º dígito adicionado (não começava com 9):', phone, '->', clean);
+  // Aplica regra do 9º dígito
+  if (ddd <= 11) {
+    // Norte/Nordeste: Se tem 10 dígitos, ADICIONA o 9º dígito
+    if (clean.length === 10) {
+      clean = clean.substring(0, 2) + '9' + clean.substring(2);
+      console.log('✅ 9º dígito ADICIONADO (DDD ≤ 11):', phone, '→', clean);
+    }
+  } else if (ddd >= 31) {
+    // Sudeste/Sul/Centro-Oeste: Se tem 11 dígitos e começa com 9, REMOVE o 9º dígito
+    if (clean.length === 11 && clean[2] === '9') {
+      clean = clean.substring(0, 2) + clean.substring(3);
+      console.log('✅ 9º dígito REMOVIDO (DDD ≥ 31):', phone, '→', clean);
+    }
   }
   
-  // Adicionar DDI 55
+  // Adiciona DDI 55
   return '55' + clean;
 }
 
