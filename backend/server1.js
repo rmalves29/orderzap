@@ -75,9 +75,10 @@ const logger = P({ level: 'silent' });
 
 // ==================== TENANT MANAGER ====================
 class TenantManager {
-  constructor() {
+  constructor(supabaseHelper) {
     this.clients = new Map(); // Map<tenantId, { sock, status, qr, tenant, authState }>
     this.messageQueue = new WhatsAppQueue(); // Sistema de fila para envio
+    this.supabaseHelper = supabaseHelper; // injetado após criação do SupabaseHelper
   }
 
   async createClient(tenant) {
@@ -272,7 +273,26 @@ class TenantManager {
         }
         
         console.log(`${'='.repeat(70)}`);
-        console.log(`✅ ${tenant.name} pode enviar e receber mensagens!`);
+         console.log(`✅ ${tenant.name} pode enviar e receber mensagens!`);
+
+        // Se houver mensagens pendentes na fila, tentar retomar processamento
+        try {
+          const pending = this.messageQueue.getQueueSize(tenantId);
+          const isProcessing = !!this.messageQueue.processing.get(tenantId);
+          if (pending > 0 && !isProcessing) {
+            console.log(`🔁 [Queue] Há ${pending} mensagens pendentes para ${tenant.name}. Tentando retomar processamento...`);
+            // Processar em background
+            setImmediate(() => {
+              this.processQueueForTenant(tenantId).catch(err => {
+                console.error('❌ Erro ao retomar fila após conexão:', err);
+              });
+            });
+          }
+        } catch (err) {
+          console.error('⚠️ Erro ao verificar fila pendente após conexão:', err);
+        }
+
+  
         console.log(`${'='.repeat(70)}\n`);
       } else if (connection === 'connecting') {
         console.log(`🔄 ${tenant.name} - Conectando...`);
@@ -312,7 +332,7 @@ class TenantManager {
 
       return sock;
 
-    } catch (error) {
+      } catch (error) {
       console.error(`❌ ERRO AO INICIALIZAR CLIENTE:`);
       console.error(`   Tipo: ${error.name}`);
       console.error(`   Mensagem: ${error.message}`);
@@ -321,6 +341,43 @@ class TenantManager {
       throw error;
     }
   }
+
+    /**
+     * Inicia o processamento da fila para um tenant usando as funções
+     * de envio e validação que dependem do contexto do TenantManager
+     */
+    async processQueueForTenant(tenantId) {
+      if (!this.supabaseHelper) {
+        console.warn('⚠️ SupabaseHelper não disponível em TenantManager.processQueueForTenant');
+        return;
+      }
+
+      const sendFunction = async (msg) => {
+        const sock = this.getOnlineClient(tenantId);
+        if (!sock) {
+          throw new Error('WhatsApp desconectado');
+        }
+
+        console.log(`📤 [Queue] Enviando para ${msg.groupId}`);
+        await sock.sendMessage(msg.groupId, { text: msg.message });
+
+        // Registrar no Supabase
+        await this.supabaseHelper.logMessage(
+          tenantId,
+          msg.groupId,
+          msg.message,
+          'sendflow',
+          { whatsapp_group_name: msg.groupId, product_name: msg.productName }
+        );
+      };
+
+      const validationFunction = async (tid) => {
+        // Usar validação rápida/getOnlineClient para decidir se pode enviar
+        return !!this.getOnlineClient(tid);
+      };
+
+      await this.messageQueue.processQueue(tenantId, sendFunction, validationFunction);
+    }
 
   async handleIncomingMessage(tenantId, msg, messageText) {
     const clientData = this.clients.get(tenantId);
@@ -1288,19 +1345,13 @@ function createApp(tenantManager, supabaseHelper) {
       });
     }
 
-    // Validar sessão primeiro
-    const validation = await tenantManager.validateSession(tenantId);
-    if (!validation.valid) {
-      console.log(`❌ Sessão inválida: ${validation.reason}`);
-      console.log(`${'='.repeat(70)}\n`);
-      return res.status(503).json({ 
-        success: false, 
-        error: 'WhatsApp não conectado ou sessão inválida',
-        details: validation.reason
-      });
-    }
-
-    console.log(`✅ Sessão válida - Adicionando ${messages.length} mensagens à fila`);
+      // Não bloquear enfileiramento caso a sessão esteja temporariamente indisponível.
+      const isOnline = !!tenantManager?.getOnlineClient(tenantId);
+      if (!isOnline) {
+        console.log(`⚠️ Sessão não online no momento; as mensagens serão enfileiradas e enviadas quando o WhatsApp reconectar`);
+      } else {
+        console.log(`✅ Sessão online - adicionando ${messages.length} mensagens à fila`);
+      }
 
     // Adicionar todas as mensagens na fila
     messages.forEach(msg => {
@@ -1321,37 +1372,13 @@ function createApp(tenantManager, supabaseHelper) {
       queueSize: tenantManager.messageQueue.getQueueSize(tenantId)
     });
 
-    // Iniciar processamento da fila (assíncrono)
-    setImmediate(async () => {
-      const sendFunction = async (msg) => {
-        const sock = tenantManager.getOnlineClient(tenantId);
-        if (!sock) {
-          throw new Error('WhatsApp desconectado');
-        }
-
-        console.log(`📤 [Queue] Enviando para ${msg.groupId}`);
-        await sock.sendMessage(msg.groupId, { text: msg.message });
-
-        // Registrar no banco
-        await supabaseHelper.logMessage(
-          tenantId,
-          msg.groupId,
-          msg.message,
-          'sendflow',
-          { whatsapp_group_name: msg.groupId, product_name: msg.productName }
-        );
-      };
-
-      const validationFunction = async (tid) => {
-        const validation = await tenantManager.validateSession(tid);
-        return validation.valid;
-      };
-
-      await tenantManager.messageQueue.processQueue(
-        tenantId,
-        sendFunction,
-        validationFunction
-      );
+    // Iniciar processamento da fila (assíncrono) - TenantManager centraliza lógica de envio
+    setImmediate(() => {
+      if (tenantManager) {
+        tenantManager.processQueueForTenant(tenantId).catch(err => {
+          console.error('❌ Erro ao processar fila (processQueueForTenant):', err);
+        });
+      }
     });
   });
 
@@ -1404,7 +1431,7 @@ function createApp(tenantManager, supabaseHelper) {
 }
 
 // ==================== ENCERRAMENTO GRACIOSO ====================
-const tenantManager = new TenantManager();
+let tenantManager = null;
 let cartMonitor = null;
 
 process.on('uncaughtException', (error) => {
@@ -1465,6 +1492,9 @@ async function main() {
   }
 
   const supabaseHelper = new SupabaseHelper(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+
+  // Criar TenantManager após supabaseHelper para injetar dependência
+  tenantManager = new TenantManager(supabaseHelper);
 
   const allTenants = await supabaseHelper.loadActiveTenants();
   let tenants = allTenants;
