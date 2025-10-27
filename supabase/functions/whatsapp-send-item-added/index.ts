@@ -52,7 +52,7 @@ Deno.serve(async (req) => {
 
     // Substituir variáveis no template
     const valorTotal = (quantity * unit_price).toFixed(2);
-    let mensagem = template.content
+    const mensagem = template.content
       .replace(/\{\{produto\}\}/g, product_name)
       .replace(/\{\{codigo\}\}/g, product_code)
       .replace(/\{\{quantidade\}\}/g, quantity.toString())
@@ -81,11 +81,11 @@ Deno.serve(async (req) => {
       
       console.log(`📞 Normalizando: DDD=${ddd}, Número=${number} (${number.length} dígitos)`);
       
-      if (ddd >= 31) {
-        // DDD >= 31 (SP, MG, Sul, etc): REMOVER o 9º dígito se tiver
+      if (ddd > 30) {
+        // DDD > 30 (Sudeste, Sul, Centro-Oeste): REMOVER o 9º dígito se tiver
         if (number.length === 9 && number.startsWith('9')) {
           number = number.substring(1);
-          console.log(`✂️ DDD ${ddd} >= 31: Removendo 9º dígito -> ${number}`);
+          console.log(`✂️ DDD ${ddd} > 30: Removendo 9º dígito -> ${number}`);
         }
       } else {
         // DDD <= 30 (Norte, Nordeste): ADICIONAR o 9º dígito se não tiver

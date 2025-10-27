@@ -16,17 +16,33 @@ function stripBrazilCountryCode(clean: string): string {
   return clean.startsWith('55') ? clean.slice(2) : clean;
 }
 
-function ensureBrazilianMobileNine(clean: string): string {
-  if (clean.length !== 10) {
+function applyRegionalMobileRules(clean: string): string {
+  if (clean.length < 10) {
     return clean;
   }
 
-  const ddd = Number(clean.slice(0, 2));
+  const dddString = clean.slice(0, 2);
+  const ddd = Number(dddString);
+
   if (Number.isNaN(ddd) || ddd < MIN_BRAZILIAN_DDD || ddd > MAX_BRAZILIAN_DDD) {
     return clean;
   }
 
-  return `${clean.slice(0, 2)}9${clean.slice(2)}`;
+  let number = clean.slice(2);
+
+  if (ddd <= 30) {
+    // Norte/Nordeste: garantir o nono dígito
+    if (number.length === 8) {
+      number = `9${number}`;
+    }
+  } else {
+    // Demais regiões: remover nono dígito se presente
+    if (number.length === 9 && number.startsWith('9')) {
+      number = number.slice(1);
+    }
+  }
+
+  return `${dddString}${number}`;
 }
 
 /**
@@ -37,7 +53,7 @@ export function normalizeForStorage(phone: string): string {
   if (!phone) return phone;
 
   const cleaned = stripBrazilCountryCode(removeNonDigits(phone));
-  return ensureBrazilianMobileNine(cleaned);
+  return applyRegionalMobileRules(cleaned);
 }
 
 /**
@@ -47,21 +63,21 @@ export function normalizeForStorage(phone: string): string {
 export function normalizeForSending(phone: string): string {
   if (!phone) return phone;
 
-  let clean = stripBrazilCountryCode(removeNonDigits(phone));
+  const clean = stripBrazilCountryCode(removeNonDigits(phone));
+  const normalized = applyRegionalMobileRules(clean);
 
-  if (clean.length < 10 || clean.length > 11) {
+  if (normalized.length < 10 || normalized.length > 11) {
     console.warn('[phone-utils] Invalid phone length for sending', { phone, clean });
-    return `55${clean}`;
+    return `55${normalized}`;
   }
 
-  const ddd = Number(clean.slice(0, 2));
+  const ddd = Number(normalized.slice(0, 2));
   if (Number.isNaN(ddd) || ddd < MIN_BRAZILIAN_DDD || ddd > MAX_BRAZILIAN_DDD) {
     console.warn('[phone-utils] Invalid DDD detected', { phone, ddd });
-    return `55${clean}`;
+    return `55${normalized}`;
   }
 
-  clean = ensureBrazilianMobileNine(clean);
-  return `55${clean}`;
+  return `55${normalized}`;
 }
 
 /**
@@ -72,7 +88,7 @@ export function formatPhoneForDisplay(phone: string): string {
   if (!phone) return phone;
 
   const cleanPhone = removeNonDigits(phone);
-  const phoneWithoutDDI = stripBrazilCountryCode(cleanPhone);
+  const phoneWithoutDDI = applyRegionalMobileRules(stripBrazilCountryCode(cleanPhone));
 
   if (phoneWithoutDDI.length >= 10) {
     const ddd = phoneWithoutDDI.slice(0, 2);

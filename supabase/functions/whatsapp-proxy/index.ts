@@ -7,59 +7,139 @@ interface WhatsAppIntegration {
   api_url: string;
 }
 
+interface ProxyRequestBody {
+  tenant_id?: string;
+  tenantId?: string;
+  action?: string;
+  api_url?: string;
+  server_url?: string;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
+  let body: ProxyRequestBody = {};
+
   try {
-    const { tenant_id, action, tenantId } = await req.json();
+    if (req.bodyUsed) {
+      // body already consumed by a previous middleware (shouldn't happen) but guard anyway
+      body = {};
+    } else {
+      body = await req.json() as ProxyRequestBody;
+    }
+  } catch (_err) {
+    // ignore parse errors – treated as empty body
+    body = {};
+  }
+
+  try {
+    const { tenant_id, action, tenantId, api_url, server_url } = body;
     const actualTenantId = tenant_id || tenantId;
     console.log('🔍 Proxy request:', { tenant_id: actualTenantId, action });
 
     if (!actualTenantId) {
       return new Response(
         JSON.stringify({ error: 'tenant_id is required' }),
-        { 
-          status: 400, 
+        {
+          status: 400,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         }
       );
     }
 
-    // Get WhatsApp API URL from database
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    let apiUrl = (api_url || server_url || '').trim();
 
-    const response = await fetch(
-      `${supabaseUrl}/rest/v1/integration_whatsapp?tenant_id=eq.${actualTenantId}&select=api_url`,
-      {
-        headers: {
-          'apikey': supabaseKey,
-          'Authorization': `Bearer ${supabaseKey}`,
-        },
+    if (!apiUrl) {
+      const supabaseUrl = Deno.env.get('SUPABASE_URL');
+      const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+      const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
+      const authToken = serviceKey || anonKey;
+
+      if (!supabaseUrl || !authToken) {
+        console.error('❌ SUPABASE credentials not configured in Edge function');
+        return new Response(
+          JSON.stringify({
+            error: 'Supabase credentials missing for whatsapp-proxy',
+            details: 'Configure SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY) for this function or send server_url'
+          }),
+          {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        );
       }
-    );
 
-    const integrations = await response.json() as WhatsAppIntegration[];
-    
-    if (!integrations || integrations.length === 0) {
-      console.error('❌ No WhatsApp integration found for tenant:', actualTenantId);
+      const response = await fetch(
+        `${supabaseUrl}/rest/v1/integration_whatsapp?tenant_id=eq.${actualTenantId}&select=api_url`,
+        {
+          headers: {
+            'apikey': authToken,
+            'Authorization': `Bearer ${authToken}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        console.error('❌ Failed to load integration from Supabase:', response.status, errorBody);
+        return new Response(
+          JSON.stringify({
+            error: 'Failed to load WhatsApp integration',
+            details: errorBody || response.statusText,
+          }),
+          {
+            status: response.status === 404 ? 404 : 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        );
+      }
+
+      const integrations = await response.json() as WhatsAppIntegration[];
+
+      if (!Array.isArray(integrations) || integrations.length === 0 || !integrations[0]?.api_url) {
+        console.error('❌ No WhatsApp integration found for tenant:', actualTenantId);
+        return new Response(
+          JSON.stringify({ error: 'WhatsApp integration not configured' }),
+          {
+            status: 404,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        );
+      }
+
+      apiUrl = integrations[0].api_url.trim();
+    }
+
+    if (!apiUrl) {
       return new Response(
         JSON.stringify({ error: 'WhatsApp integration not configured' }),
-        { 
-          status: 404, 
+        {
+          status: 404,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         }
       );
     }
 
-    const apiUrl = integrations[0].api_url;
-    
+    // Normalizar URL removendo barra final
+    apiUrl = apiUrl.replace(/\/$/, '');
+
+    if (!apiUrl.startsWith('http')) {
+      console.error('❌ Invalid API URL configured for tenant:', apiUrl);
+      return new Response(
+        JSON.stringify({ error: 'Invalid WhatsApp server URL configured' }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        }
+      );
+    }
+
     // Construir URL correta: /qr/:tenant_id ou /status/:tenant_id
     const endpoint = action === 'status' ? 'status' : 'qr';
     const fullUrl = `${apiUrl}/${endpoint}/${actualTenantId}`;
-    
+
     console.log('📡 Forwarding to WhatsApp server:', fullUrl);
 
     // Make request to WhatsApp server with tenant_id in URL
@@ -68,10 +148,29 @@ Deno.serve(async (req) => {
       headers: {
         'Accept': 'text/html,application/json',
       },
+    }).catch((error) => {
+      console.error('❌ Error proxying request to WhatsApp server:', error);
+      throw new Error('Não foi possível conectar ao servidor WhatsApp configurado');
     });
 
     console.log('📡 Response status:', whatsappResponse.status);
     console.log('📄 Content-Type:', whatsappResponse.headers.get('content-type'));
+
+    if (!whatsappResponse.ok) {
+      const errorBody = await whatsappResponse.text();
+      console.error('❌ WhatsApp server returned error:', whatsappResponse.status, errorBody);
+      return new Response(
+        JSON.stringify({
+          error: 'Erro ao consultar servidor WhatsApp',
+          status: whatsappResponse.status,
+          details: errorBody,
+        }),
+        {
+          status: whatsappResponse.status,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        }
+      );
+    }
 
     const contentType = whatsappResponse.headers.get('content-type') || '';
     

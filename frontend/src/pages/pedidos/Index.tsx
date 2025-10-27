@@ -11,6 +11,7 @@ import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Calendar } from '@/components/ui/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Loader2, CalendarIcon, Eye, Filter, Download, Printer, Check, FileText, Save, Edit, Trash2, MessageCircle, Send, ArrowLeft, BarChart3, DollarSign, Clock, Package, Search } from 'lucide-react';
 import { Separator } from '@/components/ui/separator';
 import { format } from 'date-fns';
@@ -58,6 +59,8 @@ interface Order {
   }[];
 }
 
+type OrderPaymentContext = Pick<Order, 'id' | 'customer_phone' | 'total_amount' | 'event_type'>;
+
 const Pedidos = () => {
   const { toast } = useToast();
   const { profile } = useAuth();
@@ -76,6 +79,8 @@ const Pedidos = () => {
   const [viewOrderOpen, setViewOrderOpen] = useState(false);
   const [activeView, setActiveView] = useState<'dashboard' | 'management'>('dashboard');
   const [searchTerm, setSearchTerm] = useState('');
+  const [confirmPaidDialogOpen, setConfirmPaidDialogOpen] = useState(false);
+  const [orderPendingPayment, setOrderPendingPayment] = useState<OrderPaymentContext | null>(null);
 
   // Filtros específicos para Mensagem em Massa
   const [broadcastPaid, setBroadcastPaid] = useState<'all' | 'paid' | 'unpaid'>('all');
@@ -196,11 +201,101 @@ const Pedidos = () => {
     loadOrders();
   }, [filterPaid, filterEventType, filterDate]);
 
+  const openPaidConfirmationDialog = (orderId: number) => {
+    const orderInfo = orders.find(order => order.id === orderId);
+
+    if (orderInfo) {
+      setOrderPendingPayment({
+        id: orderInfo.id,
+        customer_phone: orderInfo.customer_phone,
+        total_amount: orderInfo.total_amount,
+        event_type: orderInfo.event_type
+      });
+    } else {
+      setOrderPendingPayment({
+        id: orderId,
+        customer_phone: '',
+        total_amount: 0,
+        event_type: ''
+      });
+    }
+
+    setConfirmPaidDialogOpen(true);
+  };
+
+  const handleCancelPaidDialog = () => {
+    setConfirmPaidDialogOpen(false);
+    setOrderPendingPayment(null);
+  };
+
+  const markOrderAsPaid = async (orderId: number, shouldSendMessage: boolean) => {
+    const updateData: any = {
+      is_paid: true,
+      skip_paid_message: !shouldSendMessage
+    };
+
+    if (!shouldSendMessage) {
+      updateData.payment_confirmation_sent = false;
+    }
+
+    const { error } = await supabaseTenant
+      .from('orders')
+      .update(updateData)
+      .eq('id', orderId);
+
+    if (error) throw error;
+
+    setOrders(prev => prev.map(order =>
+      order.id === orderId
+        ? {
+            ...order,
+            is_paid: true,
+            payment_confirmation_sent: shouldSendMessage
+          }
+        : order
+    ));
+  };
+
+  const handlePaidConfirmationDecision = async (shouldSend: boolean) => {
+    if (!orderPendingPayment) return;
+
+    const orderId = orderPendingPayment.id;
+    setConfirmPaidDialogOpen(false);
+    setProcessingIds(prev => new Set(prev).add(orderId));
+
+    try {
+      await markOrderAsPaid(orderId, shouldSend);
+
+      toast({
+        title: 'Sucesso',
+        description: shouldSend
+          ? 'Pedido marcado como pago e confirmação será enviada.'
+          : 'Pedido marcado como pago sem enviar mensagem.'
+      });
+
+      await loadOrders();
+    } catch (error) {
+      console.error('❌ Erro ao atualizar status:', error);
+      toast({
+        title: 'Erro',
+        description: 'Erro ao atualizar status do pagamento',
+        variant: 'destructive'
+      });
+    } finally {
+      setProcessingIds(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(orderId);
+        return newSet;
+      });
+      setOrderPendingPayment(null);
+    }
+  };
+
   const togglePaidStatus = async (orderId: number, currentStatus: boolean) => {
     // Se está DESMARCANDO como pago, apenas faz o update sem confirmação
     if (currentStatus) {
       setProcessingIds(prev => new Set(prev).add(orderId));
-      
+
       try {
         const { error } = await supabaseTenant
           .from('orders')
@@ -235,70 +330,7 @@ const Pedidos = () => {
       return;
     }
 
-    // Se está MARCANDO como pago, pede confirmação
-    const confirmed = confirm('Deseja marcar este pedido como pago e enviar a confirmação por WhatsApp?');
-    
-    if (!confirmed) {
-      return;
-    }
-
-    setProcessingIds(prev => new Set(prev).add(orderId));
-    
-    try {
-      let messageSent = false;
-      
-      console.log('💰 Pedido sendo marcado como PAGO - enviando mensagem');
-      try {
-        messageSent = await sendPaidOrderMessage(orderId);
-        console.log('📨 Resultado do envio:', messageSent);
-      } catch (msgError) {
-        console.error('❌ Erro ao enviar mensagem:', msgError);
-        // Continua mesmo se falhar o envio
-      }
-
-      // Update payment status in database
-      const updateData: any = { is_paid: true };
-      if (messageSent) {
-        updateData.payment_confirmation_sent = true;
-      }
-
-      const { error } = await supabaseTenant
-        .from('orders')
-        .update(updateData)
-        .eq('id', orderId);
-
-      if (error) throw error;
-      
-      // Update local state
-      setOrders(prev => prev.map(order => 
-        order.id === orderId 
-          ? { ...order, is_paid: true, payment_confirmation_sent: messageSent }
-          : order
-      ));
-
-      toast({
-        title: 'Sucesso',
-        description: 'Pedido marcado como pago'
-      });
-    } catch (error) {
-      console.error('❌ Erro ao atualizar status:', error);
-      toast({
-        title: 'Erro',
-        description: 'Erro ao atualizar status do pagamento',
-        variant: 'destructive'
-      });
-    } finally {
-      setProcessingIds(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(orderId);
-        return newSet;
-      });
-    }
-  };
-
-  const sendPaidOrderMessage = async (orderId: number) => {
-    // WhatsApp functionality removed
-    return false;
+    openPaidConfirmationDialog(orderId);
   };
 
   const saveObservation = async (orderId: number) => {
@@ -1159,10 +1191,41 @@ const Pedidos = () => {
               </div>
             </div>
           )}
-        </CardContent>
-      </Card>
+      </CardContent>
+    </Card>
 
-      <EditOrderDialog 
+      <Dialog
+        open={confirmPaidDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            handleCancelPaidDialog();
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Enviar confirmação de pagamento?</DialogTitle>
+            <DialogDescription>
+              {orderPendingPayment
+                ? `O pedido #${orderPendingPayment.id} será marcado como pago. Deseja enviar a mensagem de confirmação para ${formatPhoneForDisplay(orderPendingPayment.customer_phone)}?`
+                : 'Deseja enviar a mensagem de confirmação para este pedido?'}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="ghost" onClick={handleCancelPaidDialog}>
+              Cancelar
+            </Button>
+            <Button variant="outline" onClick={() => handlePaidConfirmationDecision(false)}>
+              Marcar sem enviar
+            </Button>
+            <Button onClick={() => handlePaidConfirmationDecision(true)}>
+              Enviar confirmação
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <EditOrderDialog
         open={editOrderOpen}
         onOpenChange={setEditOrderOpen}
         order={editingOrder}

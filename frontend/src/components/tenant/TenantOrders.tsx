@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { supabaseTenant } from '@/lib/supabase-tenant';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/useAuth';
@@ -19,6 +19,7 @@ interface Order {
   total_amount: number;
   is_paid: boolean;
   payment_link?: string;
+  payment_confirmation_sent?: boolean;
   observation?: string;
   whatsapp_group_name?: string;
   created_at: string;
@@ -49,6 +50,8 @@ export default function TenantOrders() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<OrderWithItems | null>(null);
   const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
+  const [isConfirmDialogOpen, setIsConfirmDialogOpen] = useState(false);
+  const [pendingPaymentOrder, setPendingPaymentOrder] = useState<Order | null>(null);
   const [filter, setFilter] = useState<'all' | 'paid' | 'pending'>('all');
   const { profile } = useAuth();
   const { toast } = useToast();
@@ -81,7 +84,7 @@ export default function TenantOrders() {
 
   const loadOrderDetails = async (order: Order) => {
     try {
-      let orderWithItems: OrderWithItems = { ...order };
+      const orderWithItems: OrderWithItems = { ...order };
 
       if (order.cart_id) {
         const { data: cartItems, error } = await supabaseTenant
@@ -118,23 +121,33 @@ export default function TenantOrders() {
     }
   };
 
-  const markAsPaid = async (orderId: number) => {
+  const markAsPaid = async (orderId: number, shouldSendMessage: boolean) => {
     try {
       const { error } = await supabaseTenant
         .from('orders')
-        .update({ is_paid: true })
+        .update({
+          is_paid: true,
+          skip_paid_message: !shouldSendMessage,
+          payment_confirmation_sent: shouldSendMessage ? undefined : false
+        })
         .eq('id', orderId);
 
       if (error) throw error;
 
       toast({
         title: 'Sucesso',
-        description: 'Pedido marcado como pago!'
+        description: shouldSendMessage
+          ? 'Pedido marcado como pago e confirmação será enviada.'
+          : 'Pedido marcado como pago sem enviar mensagem.'
       });
 
-      loadOrders();
+      await loadOrders();
       if (selectedOrder && selectedOrder.id === orderId) {
-        setSelectedOrder({ ...selectedOrder, is_paid: true });
+        setSelectedOrder({
+          ...selectedOrder,
+          is_paid: true,
+          payment_confirmation_sent: shouldSendMessage
+        });
       }
     } catch (error: any) {
       toast({
@@ -143,6 +156,23 @@ export default function TenantOrders() {
         variant: 'destructive'
       });
     }
+  };
+
+  const openPaymentConfirmation = (order: Order) => {
+    setPendingPaymentOrder(order);
+    setIsConfirmDialogOpen(true);
+  };
+
+  const closePaymentConfirmation = () => {
+    setIsConfirmDialogOpen(false);
+    setPendingPaymentOrder(null);
+  };
+
+  const handlePaymentDecision = async (shouldSend: boolean) => {
+    if (!pendingPaymentOrder) return;
+    const orderId = pendingPaymentOrder.id;
+    closePaymentConfirmation();
+    await markAsPaid(orderId, shouldSend);
   };
 
   const formatPhone = (phone: string) => {
@@ -260,7 +290,7 @@ export default function TenantOrders() {
                     {!order.is_paid && (
                       <Button
                         size="sm"
-                        onClick={() => markAsPaid(order.id)}
+                        onClick={() => openPaymentConfirmation(order)}
                       >
                         <CreditCard className="h-4 w-4 mr-2" />
                         Marcar como Pago
@@ -408,7 +438,7 @@ export default function TenantOrders() {
 
                 {!selectedOrder.is_paid && (
                   <div className="flex justify-end">
-                    <Button onClick={() => markAsPaid(selectedOrder.id)}>
+                    <Button onClick={() => openPaymentConfirmation(selectedOrder)}>
                       <CreditCard className="h-4 w-4 mr-2" />
                       Marcar como Pago
                     </Button>
@@ -416,6 +446,37 @@ export default function TenantOrders() {
                 )}
               </div>
             )}
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          open={isConfirmDialogOpen}
+          onOpenChange={(open) => {
+            if (!open) {
+              closePaymentConfirmation();
+            }
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Enviar confirmação de pagamento?</DialogTitle>
+              <DialogDescription>
+                {pendingPaymentOrder
+                  ? `O pedido #${pendingPaymentOrder.id} será marcado como pago. Deseja enviar a mensagem de confirmação para ${formatPhone(pendingPaymentOrder.customer_phone)}?`
+                  : 'Deseja enviar a mensagem de confirmação para este pedido?'}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter className="gap-2">
+              <Button variant="ghost" onClick={closePaymentConfirmation}>
+                Cancelar
+              </Button>
+              <Button variant="outline" onClick={() => handlePaymentDecision(false)}>
+                Marcar sem enviar
+              </Button>
+              <Button onClick={() => handlePaymentDecision(true)}>
+                Enviar confirmação
+              </Button>
+            </DialogFooter>
           </DialogContent>
         </Dialog>
       </CardContent>

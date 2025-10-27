@@ -217,7 +217,8 @@ export default function ConexaoWhatsApp() {
         {
           body: {
             action: 'qr',
-            tenant_id: tenant.id
+            tenant_id: tenant.id,
+            server_url: serverUrl
           }
         }
       );
@@ -310,7 +311,8 @@ export default function ConexaoWhatsApp() {
         {
           body: {
             action: 'status',
-            tenant_id: tenant.id
+            tenant_id: tenant.id,
+            server_url: serverUrl
           }
         }
       );
