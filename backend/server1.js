@@ -362,12 +362,21 @@ class TenantManager {
         await sock.sendMessage(msg.groupId, { text: msg.message });
 
         // Registrar no Supabase
+        const metadata = {
+          whatsapp_group_name: msg.groupName || msg.groupId,
+          product_name: msg.productName,
+        };
+
+        if (typeof msg.delayAfterMs === 'number') {
+          metadata.delay_after_ms = msg.delayAfterMs;
+        }
+
         await this.supabaseHelper.logMessage(
           tenantId,
           msg.groupId,
           msg.message,
           'sendflow',
-          { whatsapp_group_name: msg.groupId, product_name: msg.productName }
+          metadata
         );
       };
 
@@ -860,8 +869,8 @@ class CartMonitor {
  * Esta função é chamada APENAS no momento do envio.
  * 
  * Regra do 9º dígito:
- * - DDD ≤ 11: Se tiver 10 dígitos → ADICIONA o 9º dígito
- * - DDD ≥ 31: Se tiver 11 dígitos → REMOVE o 9º dígito
+ * - DDD ≤ 30: Se tiver 10 dígitos → ADICIONA o 9º dígito
+ * - DDD > 30: Se tiver 11 dígitos → REMOVE o 9º dígito
  */
 function normalizePhone(phone) {
   let clean = phone.replace(/\D/g, '');
@@ -886,17 +895,17 @@ function normalizePhone(phone) {
   }
   
   // Aplica regra do 9º dígito para envio
-  if (ddd <= 11) {
+  if (ddd <= 30) {
     // Norte/Nordeste: Se tem 10 dígitos, ADICIONA o 9º dígito
     if (clean.length === 10) {
       clean = clean.substring(0, 2) + '9' + clean.substring(2);
-      console.log('📤 9º dígito ADICIONADO para envio (DDD ≤ 11):', phone, '→', clean);
+      console.log('📤 9º dígito ADICIONADO para envio (DDD ≤ 30):', phone, '→', clean);
     }
-  } else if (ddd >= 31) {
-    // Sudeste/Sul/Centro-Oeste: Se tem 11 dígitos e começa com 9, REMOVE o 9º dígito
+  } else if (ddd > 30) {
+    // Demais regiões: Se tem 11 dígitos e começa com 9, REMOVE o 9º dígito
     if (clean.length === 11 && clean[2] === '9') {
       clean = clean.substring(0, 2) + clean.substring(3);
-      console.log('📤 9º dígito REMOVIDO para envio (DDD ≥ 31):', phone, '→', clean);
+      console.log('📤 9º dígito REMOVIDO para envio (DDD > 30):', phone, '→', clean);
     }
   }
   
@@ -1328,7 +1337,7 @@ function createApp(tenantManager, supabaseHelper) {
   // Nova rota: SendFlow com fila de mensagens (batch)
   app.post('/sendflow-batch', async (req, res) => {
     const { tenantId } = req;
-    const { messages } = req.body; // Array de { groupId, message, productName }
+    const { messages } = req.body; // Array de { groupId, message, productName, groupName?, delayAfterMs? }
 
     console.log(`\n${'='.repeat(70)}`);
     console.log(`📦 SENDFLOW BATCH - Recebendo lote de mensagens`);
@@ -1357,8 +1366,10 @@ function createApp(tenantManager, supabaseHelper) {
     messages.forEach(msg => {
       tenantManager.messageQueue.enqueue(tenantId, {
         groupId: msg.groupId,
+        groupName: msg.groupName,
         message: msg.message,
-        productName: msg.productName || 'N/A'
+        productName: msg.productName || 'N/A',
+        delayAfterMs: typeof msg.delayAfterMs === 'number' ? Math.max(0, msg.delayAfterMs) : undefined
       });
     });
 

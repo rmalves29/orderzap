@@ -399,25 +399,32 @@ function normalizePhone(phone) {
   
   const clean = phone.replace(/\D/g, '');
   const withoutDDI = clean.startsWith('55') ? clean.substring(2) : clean;
-  
-  let normalized = withoutDDI;
-  
-  // Adicionar 9º dígito se necessário
-  if (normalized.length >= 10 && normalized.length <= 11) {
-    const ddd = parseInt(normalized.substring(0, 2));
-    
-    if (ddd >= 11 && ddd <= 99) {
-      if (normalized.length === 10) {
-        const firstDigit = normalized[2];
-        if (firstDigit !== '9') {
-          normalized = normalized.substring(0, 2) + '9' + normalized.substring(2);
-          console.log(`✅ 9º dígito adicionado: ${phone} -> ${normalized}`);
-        }
-      }
+
+  if (withoutDDI.length < 10 || withoutDDI.length > 11) {
+    return '55' + withoutDDI;
+  }
+
+  const ddd = parseInt(withoutDDI.substring(0, 2));
+
+  if (Number.isNaN(ddd) || ddd < 11 || ddd > 99) {
+    return '55' + withoutDDI;
+  }
+
+  let number = withoutDDI.substring(2);
+
+  if (ddd <= 30) {
+    if (number.length === 8) {
+      number = '9' + number;
+      console.log(`✅ 9º dígito adicionado (DDD ≤ 30): ${phone} -> ${ddd}${number}`);
+    }
+  } else if (ddd > 30) {
+    if (number.length === 9 && number.startsWith('9')) {
+      number = number.substring(1);
+      console.log(`✂️ 9º dígito removido (DDD > 30): ${phone} -> ${ddd}${number}`);
     }
   }
-  
-  return '55' + normalized;
+
+  return '55' + ddd.toString().padStart(2, '0') + number;
 }
 
 function delay(ms) {

@@ -71,3 +71,10 @@ Yes, you can!
 To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
 
 Read more here: [Setting up a custom domain](https://docs.lovable.dev/tips-tricks/custom-domain#step-by-step-guide)
+
+## Branch and deployment workflow
+
+- O desenvolvimento contínuo do OrderZap acontece no branch `work`, que concentra os commits aplicados diretamente neste repositório do GitHub.
+- Sempre que uma alteração é concluída localmente, ela é versionada com `git commit` e enviada (`git push`) para o mesmo branch para que serviços como Railway ou Supabase possam sincronizar o código.
+- Para trazer a versão mais recente em outra máquina, execute `git fetch origin work && git checkout work && git pull`.
+- Caso precise revisar o histórico dos ajustes, utilize `git log --oneline` no branch `work`, onde estarão todos os commits aprovados.

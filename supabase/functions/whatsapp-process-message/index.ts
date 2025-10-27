@@ -69,68 +69,80 @@ Deno.serve(async (req) => {
 
     console.log('✅ Códigos detectados:', codes);
 
+    const applyRegionalPhoneRules = (digits: string): string => {
+      if (digits.length < 10) {
+        return digits;
+      }
+
+      const dddString = digits.substring(0, 2);
+      const number = digits.substring(2);
+      const ddd = parseInt(dddString, 10);
+
+      if (Number.isNaN(ddd) || ddd < 11 || ddd > 99) {
+        return digits;
+      }
+
+      if (ddd <= 30) {
+        if (number.length === 8) {
+          console.log(`➕ DDD ${ddd} (<=30): adicionando 9º dígito`);
+          return `${dddString}9${number}`;
+        }
+        return digits;
+      }
+
+      if (number.length === 9 && number.startsWith('9')) {
+        console.log(`✂️ DDD ${ddd} (>=31): removendo 9º dígito`);
+        return `${dddString}${number.substring(1)}`;
+      }
+
+      return digits;
+    };
+
     // Função para normalizar telefone SOMENTE para envio no WhatsApp
     function normalizePhoneForWhatsApp(phone: string): string {
       // Remover tudo que não é número
       let clean = phone.replace(/\D/g, '');
-      
+
       console.log(`🔍 Telefone original (limpo): ${clean} (${clean.length} dígitos)`);
-      
+
       // Remover código do país (55) se tiver
       if (clean.startsWith('55')) {
         clean = clean.substring(2);
         console.log(`✂️ Removido DDI 55: ${clean}`);
       }
-      
+
       // Validar tamanho
       if (clean.length < 10 || clean.length > 11) {
         console.warn(`⚠️ Telefone com tamanho inválido: ${clean.length} dígitos`);
         return '55' + clean;
       }
-      
-      const ddd = parseInt(clean.substring(0, 2));
-      
-      // Validar DDD
-      if (ddd < 11 || ddd > 99) {
-        console.warn('⚠️ DDD inválido:', ddd);
-        return '55' + clean;
-      }
-      
-      // Garantir 9º dígito para celulares
-      if (clean.length === 10 && clean[2] === '9') {
-        clean = clean.substring(0, 2) + '9' + clean.substring(2);
-        console.log('✅ 9º dígito adicionado para celular:', clean);
-      } else if (clean.length === 10 && clean[2] !== '9') {
-        clean = clean.substring(0, 2) + '9' + clean.substring(2);
-        console.log('✅ 9º dígito adicionado:', clean);
-      }
-      
+
+      const normalized = applyRegionalPhoneRules(clean);
+
       // Adicionar DDI 55
-      return '55' + clean;
+      return '55' + normalized;
     }
 
-    // Função para normalizar telefone para armazenamento (sempre com 11 dígitos)
+    // Função para normalizar telefone para armazenamento aplicando as mesmas regras regionais
     const normalizeForStorage = (phone: string): string => {
       let clean = phone.replace(/\D/g, '');
-      
+
       // Remove DDI 55 se presente
       if (clean.startsWith('55')) {
         clean = clean.substring(2);
       }
-      
-      // Se tem 10 dígitos, adiciona o 9º dígito
-      if (clean.length === 10) {
-        const ddd = clean.substring(0, 2);
-        const number = clean.substring(2);
-        clean = ddd + '9' + number;
-        console.log('✅ 9º dígito ADICIONADO para armazenamento (WhatsApp):', phone, '→', clean);
+
+      const normalized = applyRegionalPhoneRules(clean);
+
+      if (normalized !== clean) {
+        console.log('ℹ️ Telefone ajustado para armazenamento:', phone, '→', normalized);
       }
-      
-      return clean;
+
+      return normalized;
     };
 
     const messageText = message.trim();
-    const senderPhone = normalizePhoneForWhatsApp(customer_phone);
+    const phoneForWhatsApp = normalizePhoneForWhatsApp(customer_phone);
     const phoneForStorage = normalizeForStorage(customer_phone);
     
     console.log('\n📞 ===== TELEFONES =====');
@@ -196,6 +208,9 @@ Deno.serve(async (req) => {
       console.log(`   Preço: R$ ${product.price}`);
       console.log(`   Estoque: ${product.stock}`);
 
+      const targetEventType = product.sale_type === 'LIVE' ? 'LIVE' : 'BAZAR';
+      console.log(`   Tipo de evento do produto: ${targetEventType}`);
+
       // 2. Verificar estoque
       if (product.stock <= 0) {
         console.error(`❌ Produto ${code} sem estoque`);
@@ -204,12 +219,12 @@ Deno.serve(async (req) => {
       }
 
       // 3. Buscar pedido existente NÃO pago do mesmo dia
-      // IMPORTANTE: Filtrar apenas BAZAR e MANUAL, excluir LIVE
+      // IMPORTANTE: reutilizar pedidos apenas do mesmo tipo de evento
       console.log('\n🔎 ===== BUSCANDO PEDIDO EXISTENTE =====');
       console.log('📋 Tenant ID:', tenant_id);
       console.log('📋 Telefone para buscar:', phoneForStorage);
       console.log('📋 Data:', today);
-      console.log('📋 Tipos aceitos: BAZAR, MANUAL');
+      console.log(`📋 Tipo aceito: ${targetEventType}`);
       console.log('📋 Status: não pago');
       
       const { data: existingOrders, error: orderSearchError } = await supabase
@@ -219,7 +234,7 @@ Deno.serve(async (req) => {
         .eq('customer_phone', phoneForStorage)
         .eq('event_date', today)
         .eq('is_paid', false)
-        .in('event_type', ['BAZAR', 'MANUAL'])
+        .eq('event_type', targetEventType)
         .order('created_at', { ascending: false })
         .limit(1);
 
@@ -243,12 +258,12 @@ Deno.serve(async (req) => {
       let orderId: number;
       let cartId: number | null = null;
 
-      // 4. Usar pedido existente OU criar novo pedido BAZAR
+      // 4. Usar pedido existente OU criar novo pedido respeitando o tipo do produto
       if (existingOrders && existingOrders.length > 0) {
         const existingOrder = existingOrders[0];
         orderId = existingOrder.id;
         cartId = existingOrder.cart_id;
-        
+
         console.log(`✅ Pedido existente encontrado: #${orderId}`);
         console.log(`   Tipo: ${existingOrder.event_type}`);
         console.log(`   Total atual: R$ ${existingOrder.total_amount}`);
@@ -268,15 +283,15 @@ Deno.serve(async (req) => {
 
         console.log(`✅ Total atualizado para: R$ ${newTotal}`);
       } else {
-        // Criar novo pedido do tipo BAZAR
-        console.log('📝 Criando novo pedido BAZAR...');
-        
+        // Criar novo pedido alinhado ao tipo de venda do produto
+        console.log(`📝 Criando novo pedido ${targetEventType}...`);
+
         const { data: newOrder, error: orderError } = await supabase
           .from('orders')
           .insert([{
             tenant_id,
             customer_phone: phoneForStorage, // Armazenar SEM normalização
-            event_type: 'BAZAR',
+            event_type: targetEventType,
             event_date: today,
             total_amount: subtotal,
             is_paid: false,
@@ -292,19 +307,19 @@ Deno.serve(async (req) => {
         }
 
         orderId = newOrder.id;
-        console.log(`✅ Novo pedido BAZAR criado: #${orderId}`);
+        console.log(`✅ Novo pedido ${targetEventType} criado: #${orderId}`);
       }
 
       // 5. Criar carrinho se não existir
       if (!cartId) {
         console.log('🛒 Criando carrinho...');
-        
+
         const { data: newCart, error: cartError } = await supabase
           .from('carts')
           .insert({
             tenant_id,
             customer_phone: phoneForStorage, // Armazenar SEM normalização
-            event_type: 'BAZAR',
+            event_type: targetEventType,
             event_date: today,
             status: 'OPEN',
             whatsapp_group_name: group_name || null

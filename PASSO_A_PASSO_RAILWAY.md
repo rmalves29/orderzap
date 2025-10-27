@@ -52,6 +52,16 @@
 
 4. **Se já estiver conectado**: ✅ Prossiga!
 
+### 1.3 - Como enviar novas alterações para o Railway
+
+> ⚠️ O Railway **sempre** busca o código diretamente do GitHub. Alterações que ficam só no Lovable ou apenas em commits locais **não são implantadas**.
+
+1. **Faça commit das alterações** no repositório (pode ser por aqui ou localmente).
+2. **Envie o commit para o GitHub** (`git push` ou botão de sincronização do Lovable).
+3. **Railway detecta automaticamente** o novo commit e inicia um novo deploy. Se preferir, abra o projeto no Railway e clique em **"Deploy"** para forçar a publicação.
+
+💡 Se precisar de ajuda para gerar os commits aqui pelo agente, é só pedir! Ainda assim, alguém precisa confirmar o push para o GitHub para que o Railway aplique as mudanças.
+
 ---
 
 ## ETAPA 2: Criar Conta no Railway (3 minutos)

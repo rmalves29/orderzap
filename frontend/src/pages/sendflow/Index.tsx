@@ -1,26 +1,47 @@
-import { useState, useEffect } from 'react';
-import { supabaseTenant } from '@/lib/supabase-tenant';
-import { useToast } from '@/hooks/use-toast';
-import { useTenant } from '@/hooks/useTenant';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Loader2, Send, Save, Users, Package, Clock, RefreshCw, CheckCircle2, XCircle } from 'lucide-react';
-import { Separator } from '@/components/ui/separator';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { useToast } from '@/hooks/use-toast';
+import { useTenant } from '@/hooks/useTenant';
+import { supabaseTenant } from '@/lib/supabase-tenant';
+import {
+  Loader2,
+  RefreshCw,
+  Save,
+  Send,
+  Users,
+  Package,
+  CheckCircle2,
+  XCircle,
+} from 'lucide-react';
 
 interface Product {
   id: number;
   code: string;
   name: string;
-  color?: string;
-  size?: string;
+  color?: string | null;
+  size?: string | null;
   price: number;
-  image_url?: string;
+  image_url?: string | null;
 }
 
 interface WhatsAppGroup {
@@ -29,41 +50,111 @@ interface WhatsAppGroup {
   participantCount?: number;
 }
 
-export default function SendFlow() {
+const DEFAULT_TEMPLATE =
+  '🛍️ *{{nome}}* ({{codigo}})\n\n' +
+  '🎨 Cor: {{cor}}\n' +
+  '📏 Tamanho: {{tamanho}}\n' +
+  '💰 Valor: {{valor}}\n\n' +
+  '📱 Para comprar, digite apenas o código: *{{codigo}}*';
+
+export default function SendFlowPage() {
   const { toast } = useToast();
   const { tenant } = useTenant();
 
-  // Estados principais
   const [products, setProducts] = useState<Product[]>([]);
   const [groups, setGroups] = useState<WhatsAppGroup[]>([]);
   const [selectedProducts, setSelectedProducts] = useState<Set<number>>(new Set());
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set());
-  const [messageTemplate, setMessageTemplate] = useState('');
-  const [intervalSeconds, setIntervalSeconds] = useState(30);
-  
-  // Estados de controle
-  const [loading, setLoading] = useState(false);
-  const [loadingGroups, setLoadingGroups] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [sendingStatus, setSendingStatus] = useState<'idle' | 'validating' | 'sending' | 'completed'>('idle');
-  const [totalMessages, setTotalMessages] = useState(0);
-  const [whatsappConnected, setWhatsappConnected] = useState(false);
+  const [messageTemplate, setMessageTemplate] = useState(DEFAULT_TEMPLATE);
+  const [groupIntervalSeconds, setGroupIntervalSeconds] = useState(10);
+  const [productIntervalMinutes, setProductIntervalMinutes] = useState(1);
+
   const [checkingConnection, setCheckingConnection] = useState(false);
+  const [whatsappConnected, setWhatsappConnected] = useState(false);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const [loadingGroups, setLoadingGroups] = useState(false);
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendingStage, setSendingStage] = useState<'idle' | 'validating' | 'sending' | 'completed'>(
+    'idle',
+  );
+  const [queuedMessages, setQueuedMessages] = useState(0);
 
-  // Carregar dados iniciais
-  useEffect(() => {
-    if (tenant?.id) {
-      loadProducts();
-      loadTemplate();
-      loadGroups();
-      checkWhatsAppConnection();
-    }
-  }, [tenant?.id]);
+  const selectedProductList = useMemo(
+    () => products.filter((product) => selectedProducts.has(product.id)),
+    [products, selectedProducts],
+  );
 
-  const checkWhatsAppConnection = async () => {
+  const selectedGroupList = useMemo(
+    () => groups.filter((group) => selectedGroups.has(group.id)),
+    [groups, selectedGroups],
+  );
+
+  const canSend =
+    selectedProductList.length > 0 &&
+    selectedGroupList.length > 0 &&
+    messageTemplate.trim().length > 0 &&
+    whatsappConnected &&
+    !sending;
+
+  const formatPrice = (price: number) =>
+    `R$ ${price.toFixed(2).replace('.', ',')}`;
+
+  const personalizeMessage = (product: Product) =>
+    messageTemplate
+      .replace(/\{\{codigo\}\}/g, product.code)
+      .replace(/\{\{nome\}\}/g, product.name)
+      .replace(/\{\{cor\}\}/g, product.color || 'N/A')
+      .replace(/\{\{tamanho\}\}/g, product.size || 'N/A')
+      .replace(/\{\{valor\}\}/g, formatPrice(product.price));
+
+  const toggleProduct = (productId: number) => {
+    setSelectedProducts((prev) => {
+      const next = new Set(prev);
+      if (next.has(productId)) {
+        next.delete(productId);
+      } else {
+        next.add(productId);
+      }
+      return next;
+    });
+  };
+
+  const toggleGroup = (groupId: string) => {
+    setSelectedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  };
+
+  const toggleAllProducts = () => {
+    setSelectedProducts((prev) => {
+      if (selectedProductList.length === products.length && products.length > 0) {
+        return new Set();
+      }
+      return new Set(products.map((product) => product.id));
+    });
+  };
+
+  const toggleAllGroups = () => {
+    setSelectedGroups((prev) => {
+      if (selectedGroupList.length === groups.length && groups.length > 0) {
+        return new Set();
+      }
+      return new Set(groups.map((group) => group.id));
+    });
+  };
+
+  const checkWhatsAppConnection = useCallback(async () => {
     if (!tenant?.id) return;
 
     setCheckingConnection(true);
+
     try {
       const { data: integration, error } = await supabaseTenant
         .from('integration_whatsapp')
@@ -76,80 +167,62 @@ export default function SendFlow() {
         return;
       }
 
-      const statusResponse = await fetch(`${integration.api_url}/status/${tenant.id}`, {
-        method: 'GET',
-        headers: { 'x-tenant-id': tenant.id }
+      const response = await fetch(`${integration.api_url}/status/${tenant.id}`, {
+        headers: { 'x-tenant-id': tenant.id },
       });
 
-      if (!statusResponse.ok) {
+      if (!response.ok) {
         setWhatsappConnected(false);
         return;
       }
 
-      const statusData = await statusResponse.json();
-      setWhatsappConnected(statusData.success && statusData.status === 'online');
+      const payload = await response.json();
+      setWhatsappConnected(payload.success && payload.status === 'online');
     } catch (error) {
-      console.error('Erro ao verificar conexão WhatsApp:', error);
+      console.error('Erro ao verificar conexão do WhatsApp:', error);
       setWhatsappConnected(false);
     } finally {
       setCheckingConnection(false);
     }
-  };
+  }, [tenant?.id]);
 
-  const loadProducts = async () => {
+  const loadProducts = useCallback(async () => {
+    if (!tenant?.id) {
+      setProducts([]);
+      return;
+    }
+
     try {
-      setLoading(true);
+      setLoadingProducts(true);
       const { data, error } = await supabaseTenant
         .from('products')
-        .select('*')
+        .select('id, code, name, color, size, price, image_url')
         .eq('is_active', true)
-        .order('name');
+        .order('name', { ascending: true });
 
       if (error) throw error;
-      setProducts(data || []);
+      setProducts(data ?? []);
     } catch (error) {
       console.error('Erro ao carregar produtos:', error);
       toast({
-        title: 'Erro',
-        description: 'Erro ao carregar produtos',
-        variant: 'destructive'
+        title: 'Erro ao carregar produtos',
+        description: 'Não foi possível carregar o catálogo.',
+        variant: 'destructive',
       });
     } finally {
-      setLoading(false);
+      setLoadingProducts(false);
     }
-  };
+  }, [tenant?.id, toast]);
 
-  const loadTemplate = async () => {
-    try {
-      const { data, error } = await supabaseTenant
-        .from('whatsapp_templates')
-        .select('content')
-        .eq('type', 'SENDFLOW')
-        .maybeSingle();
-
-      if (error && error.code !== 'PGRST116') throw error;
-
-      if (data) {
-        setMessageTemplate(data.content);
-      } else {
-        const defaultTemplate = 
-          '🛍️ *{{nome}}* ({{codigo}})\n\n' +
-          '🎨 Cor: {{cor}}\n' +
-          '📏 Tamanho: {{tamanho}}\n' +
-          '💰 Valor: {{valor}}\n\n' +
-          '📱 Para comprar, digite apenas o código: *{{codigo}}*';
-        setMessageTemplate(defaultTemplate);
-      }
-    } catch (error) {
-      console.error('Erro ao carregar template:', error);
+  const loadGroups = useCallback(async () => {
+    if (!tenant?.id) {
+      setGroups([]);
+      return;
     }
-  };
 
-  const loadGroups = async () => {
-    if (!tenant?.id) return;
-
-    setLoadingGroups(true);
     try {
+      setLoadingGroups(true);
+
       const { data: integration, error: integrationError } = await supabaseTenant
         .from('integration_whatsapp')
         .select('api_url')
@@ -160,177 +233,139 @@ export default function SendFlow() {
 
       if (!integration?.api_url) {
         toast({
-          title: 'Aviso',
-          description: 'Configure a integração WhatsApp nas configurações',
-          variant: 'destructive'
+          title: 'Integração WhatsApp não configurada',
+          description: 'Acesse Configurações > Integrações para definir a URL do servidor.',
+          variant: 'destructive',
         });
         return;
       }
 
       const response = await fetch(`${integration.api_url}/list-all-groups`, {
-        method: 'GET',
         headers: {
           'Content-Type': 'application/json',
-          'x-tenant-id': tenant.id
-        }
+          'x-tenant-id': tenant.id,
+        },
       });
 
       if (!response.ok) {
-        throw new Error('Erro ao buscar grupos do WhatsApp');
+        throw new Error('Falha ao buscar grupos do WhatsApp');
       }
 
-      const data = await response.json();
+      const payload = await response.json();
 
-      if (data.success && data.groups && Array.isArray(data.groups)) {
-        const maxGroups = tenant.max_whatsapp_groups;
-        const limitedGroups = maxGroups && maxGroups > 0 
-          ? data.groups.slice(0, maxGroups) 
-          : data.groups;
-        
-        setGroups(limitedGroups);
-        toast({
-          title: 'Grupos carregados',
-          description: `${limitedGroups.length} grupo(s) encontrado(s)`,
-        });
-      } else {
+      if (!payload.success || !Array.isArray(payload.groups)) {
         setGroups([]);
         toast({
-          title: 'Aviso',
-          description: 'Nenhum grupo encontrado',
+          title: 'Nenhum grupo encontrado',
+          description: 'Verifique se o bot está conectado ao WhatsApp.',
         });
+        return;
       }
-    } catch (error) {
-      console.error('Erro ao carregar grupos:', error);
+
+      const maxGroups = tenant.max_whatsapp_groups ?? 0;
+      const limited = maxGroups > 0 ? payload.groups.slice(0, maxGroups) : payload.groups;
+      setGroups(limited);
       toast({
-        title: 'Erro',
-        description: 'Erro ao carregar grupos do WhatsApp',
-        variant: 'destructive'
+        title: 'Grupos carregados',
+        description: `${limited.length} grupo(s) disponíveis`,
+      });
+    } catch (error) {
+      console.error('Erro ao carregar grupos do WhatsApp:', error);
+      toast({
+        title: 'Erro ao carregar grupos',
+        description: 'Não foi possível buscar os grupos conectados.',
+        variant: 'destructive',
       });
       setGroups([]);
     } finally {
       setLoadingGroups(false);
     }
-  };
+  }, [tenant?.id, tenant?.max_whatsapp_groups, toast]);
+
+  const loadTemplate = useCallback(async () => {
+    if (!tenant?.id) return;
+
+    try {
+      const { data, error } = await supabaseTenant
+        .from('whatsapp_templates')
+        .select('content')
+        .eq('type', 'SENDFLOW')
+        .maybeSingle();
+
+      if (error && error.code !== 'PGRST116') {
+        throw error;
+      }
+
+      if (data?.content) {
+        setMessageTemplate(data.content);
+      } else {
+        setMessageTemplate(DEFAULT_TEMPLATE);
+      }
+    } catch (error) {
+      console.error('Erro ao carregar template do SendFlow:', error);
+      toast({
+        title: 'Erro ao carregar template',
+        description: 'Utilizando mensagem padrão.',
+      });
+      setMessageTemplate(DEFAULT_TEMPLATE);
+    }
+  }, [tenant?.id, toast]);
 
   const saveTemplate = async () => {
     if (!messageTemplate.trim()) {
       toast({
-        title: 'Erro',
-        description: 'Digite um template de mensagem',
-        variant: 'destructive'
+        title: 'Template obrigatório',
+        description: 'Digite o texto que será enviado aos clientes.',
+        variant: 'destructive',
       });
       return;
     }
+
+    setSavingTemplate(true);
 
     try {
       const { error } = await supabaseTenant
         .from('whatsapp_templates')
-        .upsert({
-          type: 'SENDFLOW',
-          title: 'SendFlow - Divulgação em Grupos',
-          content: messageTemplate
-        }, {
-          onConflict: 'tenant_id,type'
-        });
+        .upsert(
+          {
+            type: 'SENDFLOW',
+            title: 'SendFlow - Divulgação em Grupos',
+            content: messageTemplate,
+          },
+          { onConflict: 'tenant_id,type' },
+        );
 
       if (error) throw error;
 
-      toast({
-        title: 'Sucesso',
-        description: 'Template salvo com sucesso',
-      });
+      toast({ title: 'Template salvo com sucesso' });
     } catch (error) {
       console.error('Erro ao salvar template:', error);
       toast({
-        title: 'Erro',
-        description: 'Erro ao salvar template',
-        variant: 'destructive'
+        title: 'Erro ao salvar template',
+        description: 'Tente novamente em instantes.',
+        variant: 'destructive',
       });
+    } finally {
+      setSavingTemplate(false);
     }
   };
 
-  const toggleProduct = (productId: number) => {
-    const newSelection = new Set(selectedProducts);
-    if (newSelection.has(productId)) {
-      newSelection.delete(productId);
-    } else {
-      newSelection.add(productId);
-    }
-    setSelectedProducts(newSelection);
-  };
-
-  const toggleAllProducts = () => {
-    if (selectedProducts.size === products.length) {
-      setSelectedProducts(new Set());
-    } else {
-      setSelectedProducts(new Set(products.map(p => p.id)));
-    }
-  };
-
-  const toggleGroup = (groupId: string) => {
-    const newSelection = new Set(selectedGroups);
-    if (newSelection.has(groupId)) {
-      newSelection.delete(groupId);
-    } else {
-      newSelection.add(groupId);
-    }
-    setSelectedGroups(newSelection);
-  };
-
-  const toggleAllGroups = () => {
-    if (selectedGroups.size === groups.length) {
-      setSelectedGroups(new Set());
-    } else {
-      setSelectedGroups(new Set(groups.map(g => g.id)));
-    }
-  };
-
-  const formatPrice = (price: number) => {
-    return `R$ ${price.toFixed(2).replace('.', ',')}`;
-  };
-
-  const personalizeMessage = (product: Product) => {
-    return messageTemplate
-      .replace(/\{\{codigo\}\}/g, product.code)
-      .replace(/\{\{nome\}\}/g, product.name)
-      .replace(/\{\{cor\}\}/g, product.color || 'N/A')
-      .replace(/\{\{tamanho\}\}/g, product.size || 'N/A')
-      .replace(/\{\{valor\}\}/g, formatPrice(product.price));
-  };
+  useEffect(() => {
+    if (!tenant?.id) return;
+    loadProducts();
+    loadGroups();
+    loadTemplate();
+    checkWhatsAppConnection();
+  }, [tenant?.id, loadProducts, loadGroups, loadTemplate, checkWhatsAppConnection]);
 
   const handleSendMessages = async () => {
-    if (selectedProducts.size === 0) {
-      toast({
-        title: 'Erro',
-        description: 'Selecione pelo menos um produto',
-        variant: 'destructive'
-      });
-      return;
-    }
-
-    if (selectedGroups.size === 0) {
-      toast({
-        title: 'Erro',
-        description: 'Selecione pelo menos um grupo',
-        variant: 'destructive'
-      });
-      return;
-    }
-
-    if (!messageTemplate.trim()) {
-      toast({
-        title: 'Erro',
-        description: 'Digite um template de mensagem',
-        variant: 'destructive'
-      });
-      return;
-    }
+    if (!tenant?.id) return;
+    if (!canSend) return;
 
     setSending(true);
-    setSendingStatus('validating');
+    setSendingStage('validating');
 
     try {
-      // 1. Buscar integração
       const { data: integration, error: integrationError } = await supabaseTenant
         .from('integration_whatsapp')
         .select('api_url')
@@ -341,104 +376,107 @@ export default function SendFlow() {
         throw new Error('Integração WhatsApp não configurada');
       }
 
-      // 2. Validar conexão WhatsApp
-      const statusResponse = await fetch(`${integration.api_url}/status/${tenant?.id}`, {
-        method: 'GET',
-        headers: { 'x-tenant-id': tenant?.id || '' }
+      const statusResponse = await fetch(`${integration.api_url}/status/${tenant.id}`, {
+        headers: { 'x-tenant-id': tenant.id },
       });
 
       if (!statusResponse.ok) {
-        throw new Error('Erro ao verificar status do WhatsApp');
+        throw new Error('Não foi possível validar a conexão do WhatsApp');
       }
 
-      const statusData = await statusResponse.json();
-      
-      if (!statusData.success || statusData.status !== 'online') {
+      const statusPayload = await statusResponse.json();
+      if (!statusPayload.success || statusPayload.status !== 'online') {
         toast({
-          title: 'WhatsApp não conectado',
-          description: 'Conecte o WhatsApp antes de enviar mensagens',
+          title: 'WhatsApp desconectado',
+          description: 'Conecte o bot antes de iniciar o envio.',
           variant: 'destructive',
-          duration: 8000
         });
-        setSending(false);
-        setSendingStatus('idle');
+        setSendingStage('idle');
         return;
       }
 
-      // 3. Preparar mensagens
-      setSendingStatus('sending');
-      const selectedProductArray = products.filter(p => selectedProducts.has(p.id));
-      const selectedGroupArray = Array.from(selectedGroups);
-      
-      const messages: Array<{ groupId: string; message: string; productName: string }> = [];
-      
-      selectedProductArray.forEach(product => {
-        const personalizedMessage = personalizeMessage(product);
-        selectedGroupArray.forEach(groupId => {
+      setSendingStage('sending');
+
+      const messages: Array<{
+        groupId: string;
+        groupName?: string;
+        message: string;
+        productName: string;
+        delayAfterMs?: number;
+      }> = [];
+
+      selectedProductList.forEach((product, productIndex) => {
+        const composedMessage = personalizeMessage(product);
+
+        selectedGroupList.forEach((group, groupIndex) => {
+          const isLastGroup = groupIndex === selectedGroupList.length - 1;
+          const isLastProduct = productIndex === selectedProductList.length - 1;
+          const delayAfterMs = isLastGroup
+            ? isLastProduct
+              ? 0
+              : Math.max(0, productIntervalMinutes) * 60 * 1000
+            : Math.max(0, groupIntervalSeconds) * 1000;
+
           messages.push({
-            groupId,
-            message: personalizedMessage,
-            productName: product.name
+            groupId: group.id,
+            groupName: group.name,
+            message: composedMessage,
+            productName: product.name,
+            delayAfterMs,
           });
         });
       });
 
-      setTotalMessages(messages.length);
+      setQueuedMessages(messages.length);
 
-      console.log(`📦 Enviando ${messages.length} mensagens para o backend...`);
-
-      // 4. Enviar todas as mensagens de uma vez para o backend (fila)
-      const sendResponse = await fetch(`${integration.api_url}/sendflow-batch`, {
+      const response = await fetch(`${integration.api_url}/sendflow-batch`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-tenant-id': tenant?.id || ''
+          'x-tenant-id': tenant.id,
         },
-        body: JSON.stringify({ messages })
+        body: JSON.stringify({ messages }),
       });
 
-      if (!sendResponse.ok) {
-        const errorData = await sendResponse.json().catch(() => ({}));
-        throw new Error(errorData.error || 'Erro ao enviar mensagens');
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        throw new Error(errorPayload.error || 'Falha ao enfileirar mensagens');
       }
 
-      const responseData = await sendResponse.json();
-
       toast({
-        title: '✅ Envio iniciado!',
-        description: `${messages.length} mensagens adicionadas à fila. O envio está acontecendo no background.`,
-        duration: 10000
+        title: 'Envio iniciado',
+        description: `${messages.length} mensagens adicionadas à fila. O envio ocorre em segundo plano.`,
       });
 
-      setSendingStatus('completed');
-      
-      // Resetar após 3 segundos
+      setSendingStage('completed');
+
       setTimeout(() => {
-        setSendingStatus('idle');
+        setSendingStage('idle');
         setSelectedProducts(new Set());
         setSelectedGroups(new Set());
+        setQueuedMessages(0);
       }, 3000);
-
-    } catch (error: any) {
-      console.error('Erro ao enviar mensagens:', error);
+    } catch (error) {
+      console.error('Erro ao enviar mensagens do SendFlow:', error);
       toast({
-        title: 'Erro',
-        description: error.message || 'Erro ao enviar mensagens',
+        title: 'Erro ao enviar mensagens',
+        description: error instanceof Error ? error.message : 'Tente novamente em instantes.',
         variant: 'destructive',
-        duration: 8000
       });
-      setSendingStatus('idle');
+      setSendingStage('idle');
     } finally {
       setSending(false);
     }
   };
 
   return (
-    <div className="container mx-auto p-6 space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="container mx-auto space-y-6 p-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold">SendFlow</h1>
-          <p className="text-muted-foreground">Envio automatizado de produtos para grupos do WhatsApp</p>
+          <p className="text-muted-foreground">
+            Dispare seus produtos para múltiplos grupos de WhatsApp com intervalos controlados.
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <Button
@@ -452,18 +490,16 @@ export default function SendFlow() {
             ) : (
               <RefreshCw className="h-4 w-4" />
             )}
-            <span className="ml-2">Verificar Conexão</span>
+            <span className="ml-2">Verificar conexão</span>
           </Button>
           <Badge variant={whatsappConnected ? 'default' : 'destructive'}>
             {whatsappConnected ? (
               <>
-                <CheckCircle2 className="h-3 w-3 mr-1" />
-                WhatsApp Conectado
+                <CheckCircle2 className="mr-1 h-3 w-3" /> Conectado
               </>
             ) : (
               <>
-                <XCircle className="h-3 w-3 mr-1" />
-                WhatsApp Desconectado
+                <XCircle className="mr-1 h-3 w-3" /> Desconectado
               </>
             )}
           </Badge>
@@ -471,263 +507,274 @@ export default function SendFlow() {
       </div>
 
       {!whatsappConnected && (
-        <Card className="border-destructive">
+        <Card className="border-destructive bg-destructive/10">
           <CardHeader>
-            <CardTitle className="text-destructive">⚠️ WhatsApp Desconectado</CardTitle>
+            <CardTitle className="text-destructive">WhatsApp desconectado</CardTitle>
             <CardDescription>
-              Conecte o WhatsApp na página "Conexão WhatsApp" antes de enviar mensagens
+              Conecte o bot na página "Conexão WhatsApp" antes de iniciar uma campanha.
             </CardDescription>
           </CardHeader>
         </Card>
       )}
 
-      {/* Grupos do WhatsApp */}
-      <Card>
-        <CardHeader>
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-2">
-              <Users className="h-5 w-5" />
-              <CardTitle>Grupos do WhatsApp</CardTitle>
-            </div>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={loadGroups}
-                disabled={loadingGroups}
-              >
-                {loadingGroups ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-4 w-4" />
-                )}
-                <span className="ml-2">Atualizar</span>
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={toggleAllGroups}
-                disabled={groups.length === 0}
-              >
-                {selectedGroups.size === groups.length ? 'Desmarcar Todos' : 'Selecionar Todos'}
-              </Button>
-            </div>
-          </div>
-          <CardDescription>
-            Selecione os grupos que receberão as mensagens ({selectedGroups.size} selecionado(s))
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {loadingGroups ? (
-            <div className="flex justify-center items-center py-8">
-              <Loader2 className="h-8 w-8 animate-spin" />
-            </div>
-          ) : groups.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
-              <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>Nenhum grupo encontrado</p>
-              <p className="text-sm">Certifique-se de que o WhatsApp está conectado</p>
-            </div>
-          ) : (
-            <div className="space-y-3 max-h-64 overflow-y-auto">
-              {groups.map((group) => (
-                <div
-                  key={group.id}
-                  className="flex items-center space-x-3 p-3 rounded-lg border hover:bg-accent cursor-pointer"
-                  onClick={() => toggleGroup(group.id)}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card className="h-full">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Users className="h-5 w-5" />
+                <CardTitle>Grupos do WhatsApp</CardTitle>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={loadGroups} disabled={loadingGroups}>
+                  {loadingGroups ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                  <span className="ml-2">Atualizar</span>
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={toggleAllGroups}
+                  disabled={groups.length === 0}
                 >
-                  <Checkbox
-                    checked={selectedGroups.has(group.id)}
-                    onCheckedChange={() => toggleGroup(group.id)}
-                  />
-                  <div className="flex-1">
-                    <p className="font-medium">{group.name}</p>
-                    {group.participantCount && (
-                      <p className="text-sm text-muted-foreground">
-                        {group.participantCount} participantes
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ))}
+                  {selectedGroups.size === groups.length && groups.length > 0
+                    ? 'Desmarcar todos'
+                    : 'Selecionar todos'}
+                </Button>
+              </div>
             </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Produtos */}
-      <Card>
-        <CardHeader>
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-2">
-              <Package className="h-5 w-5" />
-              <CardTitle>Produtos</CardTitle>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={toggleAllProducts}
-              disabled={products.length === 0}
-            >
-              {selectedProducts.size === products.length ? 'Desmarcar Todos' : 'Selecionar Todos'}
-            </Button>
-          </div>
-          <CardDescription>
-            Selecione os produtos que serão enviados ({selectedProducts.size} selecionado(s))
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {loading ? (
-            <div className="flex justify-center items-center py-8">
-              <Loader2 className="h-8 w-8 animate-spin" />
-            </div>
-          ) : products.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
-              <Package className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>Nenhum produto cadastrado</p>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12"></TableHead>
-                  <TableHead>Código</TableHead>
-                  <TableHead>Nome</TableHead>
-                  <TableHead>Cor</TableHead>
-                  <TableHead>Tamanho</TableHead>
-                  <TableHead>Preço</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {products.map((product) => (
-                  <TableRow
-                    key={product.id}
-                    className="cursor-pointer hover:bg-accent"
-                    onClick={() => toggleProduct(product.id)}
-                  >
-                    <TableCell>
-                      <Checkbox
-                        checked={selectedProducts.has(product.id)}
-                        onCheckedChange={() => toggleProduct(product.id)}
-                      />
-                    </TableCell>
-                    <TableCell className="font-mono">{product.code}</TableCell>
-                    <TableCell className="font-medium">{product.name}</TableCell>
-                    <TableCell>{product.color || '-'}</TableCell>
-                    <TableCell>{product.size || '-'}</TableCell>
-                    <TableCell>{formatPrice(product.price)}</TableCell>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="max-h-[440px] overflow-y-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[48px]" />
+                    <TableHead>Nome</TableHead>
+                    <TableHead>Participantes</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+                </TableHeader>
+                <TableBody>
+                  {groups.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={3} className="py-8 text-center text-muted-foreground">
+                        Nenhum grupo disponível.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    groups.map((group) => (
+                      <TableRow key={group.id} className="cursor-pointer" onClick={() => toggleGroup(group.id)}>
+                        <TableCell onClick={(event) => event.stopPropagation()}>
+                          <Checkbox
+                            checked={selectedGroups.has(group.id)}
+                            onCheckedChange={() => toggleGroup(group.id)}
+                          />
+                        </TableCell>
+                        <TableCell className="font-medium">{group.name}</TableCell>
+                        <TableCell>{group.participantCount ?? '—'}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
 
-      {/* Template de Mensagem */}
+        <Card className="h-full">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Package className="h-5 w-5" />
+                <CardTitle>Produtos</CardTitle>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={loadProducts} disabled={loadingProducts}>
+                  {loadingProducts ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                  <span className="ml-2">Atualizar</span>
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={toggleAllProducts}
+                  disabled={products.length === 0}
+                >
+                  {selectedProducts.size === products.length && products.length > 0
+                    ? 'Desmarcar todos'
+                    : 'Selecionar todos'}
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="max-h-[440px] overflow-y-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[48px]" />
+                    <TableHead>Nome</TableHead>
+                    <TableHead>Código</TableHead>
+                    <TableHead>Preço</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {products.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
+                        Nenhum produto ativo encontrado.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    products.map((product) => (
+                      <TableRow
+                        key={product.id}
+                        className="cursor-pointer"
+                        onClick={() => toggleProduct(product.id)}
+                      >
+                        <TableCell onClick={(event) => event.stopPropagation()}>
+                          <Checkbox
+                            checked={selectedProducts.has(product.id)}
+                            onCheckedChange={() => toggleProduct(product.id)}
+                          />
+                        </TableCell>
+                        <TableCell className="max-w-[240px] truncate font-medium">
+                          {product.name}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{product.code}</Badge>
+                        </TableCell>
+                        <TableCell>{formatPrice(product.price)}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
       <Card>
         <CardHeader>
-          <CardTitle>Template de Mensagem</CardTitle>
+          <CardTitle>Template da mensagem</CardTitle>
           <CardDescription>
-            Use as variáveis: {'{'}{'{'} codigo {'}'}{'}'}, {'{'}{'{'} nome {'}'}{'}'}, {'{'}{'{'} cor {'}'}{'}'}, {'{'}{'{'} tamanho {'}'}{'}'}, {'{'}{'{'} valor {'}'}{'}'}
+            Use as variáveis {{codigo}}, {{nome}}, {{cor}}, {{tamanho}} e {{valor}} para personalizar o texto.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <Textarea
             value={messageTemplate}
-            onChange={(e) => setMessageTemplate(e.target.value)}
+            onChange={(event) => setMessageTemplate(event.target.value)}
             rows={8}
-            placeholder="Digite o template da mensagem..."
+            placeholder="Digite o template a ser enviado..."
           />
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={saveTemplate}>
-              <Save className="h-4 w-4 mr-2" />
-              Salvar Template
+            <Button variant="outline" onClick={() => setMessageTemplate(DEFAULT_TEMPLATE)}>
+              Restaurar padrão
+            </Button>
+            <Button onClick={saveTemplate} disabled={savingTemplate}>
+              {savingTemplate ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Save className="mr-2 h-4 w-4" />
+              )}
+              Salvar template
             </Button>
           </div>
         </CardContent>
       </Card>
 
-      {/* Configurações de Envio */}
       <Card>
         <CardHeader>
-          <CardTitle>Configurações de Envio</CardTitle>
+          <CardTitle>Intervalos de envio</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <Label>Intervalo entre produtos (segundos)</Label>
+        <CardContent className="grid gap-6 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="group-delay">Pausa entre grupos (segundos)</Label>
             <Input
+              id="group-delay"
               type="number"
-              value={intervalSeconds}
-              onChange={(e) => setIntervalSeconds(Number(e.target.value))}
-              min="5"
-              max="300"
+              min={0}
+              value={groupIntervalSeconds}
+              onChange={(event) => setGroupIntervalSeconds(Number(event.target.value) || 0)}
             />
-            <p className="text-sm text-muted-foreground mt-1">
-              Tempo de espera após enviar todos os grupos de um produto
+            <p className="text-sm text-muted-foreground">
+              Intervalo aplicado após enviar o mesmo produto em um grupo.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="product-delay">Pausa entre produtos (minutos)</Label>
+            <Input
+              id="product-delay"
+              type="number"
+              min={0}
+              step={0.5}
+              value={productIntervalMinutes}
+              onChange={(event) => setProductIntervalMinutes(Number(event.target.value) || 0)}
+            />
+            <p className="text-sm text-muted-foreground">
+              Intervalo aplicado antes de iniciar o envio do próximo produto.
             </p>
           </div>
         </CardContent>
       </Card>
 
-      {/* Status do Envio */}
-      {sendingStatus !== 'idle' && (
-        <Card className="border-primary">
+      {sendingStage !== 'idle' && (
+        <Card className="border-primary bg-primary/5">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              {sendingStatus === 'validating' && (
+              {sendingStage === 'validating' && (
                 <>
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  Validando conexão...
+                  <Loader2 className="h-5 w-5 animate-spin" /> Validando conexão...
                 </>
               )}
-              {sendingStatus === 'sending' && (
+              {sendingStage === 'sending' && (
                 <>
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  Enviando mensagens...
+                  <Loader2 className="h-5 w-5 animate-spin" /> Enfileirando mensagens...
                 </>
               )}
-              {sendingStatus === 'completed' && (
+              {sendingStage === 'completed' && (
                 <>
-                  <CheckCircle2 className="h-5 w-5 text-green-500" />
-                  Envio concluído!
+                  <CheckCircle2 className="h-5 w-5 text-green-500" /> Envio iniciado com sucesso!
                 </>
               )}
             </CardTitle>
             <CardDescription>
-              {sendingStatus === 'validating' && 'Verificando se o WhatsApp está conectado...'}
-              {sendingStatus === 'sending' && `Adicionando ${totalMessages} mensagens à fila...`}
-              {sendingStatus === 'completed' && 'Todas as mensagens foram adicionadas à fila e estão sendo enviadas no background'}
+              {sendingStage === 'validating' && 'Verificando se o WhatsApp está conectado...'}
+              {sendingStage === 'sending' &&
+                `Gerando ${selectedProductList.length * selectedGroupList.length} mensagens...`}
+              {sendingStage === 'completed' &&
+                `${queuedMessages} mensagem(ns) adicionadas à fila. Elas serão enviadas respeitando os intervalos configurados.`}
             </CardDescription>
           </CardHeader>
         </Card>
       )}
 
-      {/* Botão de Envio */}
-      <div className="flex justify-center">
+      <div className="flex flex-col items-center gap-4">
+        <div className="text-sm text-muted-foreground">
+          {selectedProductList.length} produto(s) × {selectedGroupList.length} grupo(s) ={' '}
+          {selectedProductList.length * selectedGroupList.length} mensagens
+        </div>
         <Button
-          onClick={handleSendMessages}
-          disabled={
-            sending ||
-            selectedProducts.size === 0 ||
-            selectedGroups.size === 0 ||
-            !messageTemplate.trim() ||
-            !whatsappConnected
-          }
           size="lg"
-          className="w-full max-w-md"
+          className="w-full max-w-xl"
+          onClick={handleSendMessages}
+          disabled={!canSend}
         >
           {sending ? (
             <>
-              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-              Enviando...
+              <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Enfileirando mensagens...
             </>
           ) : (
             <>
-              <Send className="mr-2 h-5 w-5" />
-              Enviar {selectedProducts.size > 0 && selectedGroups.size > 0 
-                ? `(${selectedProducts.size} × ${selectedGroups.size} = ${selectedProducts.size * selectedGroups.size} mensagens)`
-                : 'Mensagens'}
+              <Send className="mr-2 h-5 w-5" /> Enviar campanha
             </>
           )}
         </Button>

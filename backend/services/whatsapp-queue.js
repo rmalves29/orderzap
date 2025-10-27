@@ -20,10 +20,17 @@ export class WhatsAppQueue {
     }
 
     const queue = this.queues.get(tenantId);
+    const normalizedMessage = {
+      ...message,
+      delayAfterMs: typeof message.delayAfterMs === 'number'
+        ? Math.max(0, message.delayAfterMs)
+        : undefined
+    };
+
     queue.push({
       id: `${Date.now()}-${Math.random()}`,
       tenantId,
-      ...message,
+      ...normalizedMessage,
       attempts: 0,
       maxAttempts: 3,
       createdAt: Date.now()
@@ -90,9 +97,11 @@ export class WhatsAppQueue {
         console.log(`   Stats atualizadas:`, stats);
 
         // Aguardar intervalo entre mensagens (evitar rate limit)
-        const delay = 2000; // 2 segundos
-        console.log(`⏳ [Queue] Aguardando ${delay}ms antes da próxima mensagem...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        const delay = typeof message.delayAfterMs === 'number' ? message.delayAfterMs : 2000; // fallback 2s
+        if (delay > 0) {
+          console.log(`⏳ [Queue] Aguardando ${delay}ms antes da próxima mensagem...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
 
       } catch (error) {
         message.attempts++;
