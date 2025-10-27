@@ -1,4 +1,5 @@
 -- Atualizar fluxo de confirmação de pedido pago
+-- Revisado em 2025-10 na recriação das migrações.
 BEGIN;
 
 ALTER TABLE public.orders

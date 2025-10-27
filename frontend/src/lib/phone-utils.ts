@@ -3,6 +3,8 @@
  *
  * Storage: DDD + number (no country code 55)
  * Sending: 55 + DDD + number
+ *
+ * Revalidado em 2025-10 ao recriar os utilitários após a limpeza do repositório.
  */
 
 const MIN_BRAZILIAN_DDD = 11;

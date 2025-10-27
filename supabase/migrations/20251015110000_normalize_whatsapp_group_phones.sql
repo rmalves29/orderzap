@@ -1,5 +1,4 @@
--- Normaliza telefones residuais aplicando a regra regional do nono dígito
--- em registros que podem ter sido criados antes dos ajustes recentes.
+-- Revisado em 2025-10 após recriação das rotinas.
 
 -- Garante que a função utilitária exista (idempotente)
 CREATE OR REPLACE FUNCTION public.normalize_phone_regional(phone text)

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Loader recriado em 2025-10 para manter compatibilidade após limpeza do repositório.
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 

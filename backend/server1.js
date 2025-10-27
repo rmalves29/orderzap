@@ -1,4 +1,5 @@
 // Carregar variáveis de ambiente do arquivo .env
+// Atualizado em 2025-10 após recriação completa dos arquivos principais do backend.
 import dotenv from 'dotenv';
 import baileys from '@whiskeysockets/baileys';
 import express from 'express';

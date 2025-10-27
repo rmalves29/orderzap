@@ -1,6 +1,8 @@
 /**
  * Sistema de fila para envio de mensagens WhatsApp
  * Evita sobrecarga e gerencia retry logic
+ *
+ * Revisado em 2025-10 durante a restauração do repositório.
  */
 
 export class WhatsAppQueue {

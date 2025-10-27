@@ -74,6 +74,8 @@ Read more here: [Setting up a custom domain](https://docs.lovable.dev/tips-trick
 
 ## Branch and deployment workflow
 
+> Documento revisado em outubro/2025 após a recriação dos arquivos essenciais do projeto.
+
 - O desenvolvimento contínuo do OrderZap acontece no branch `work`, que concentra os commits aplicados diretamente neste repositório do GitHub.
 - Sempre que uma alteração é concluída localmente, ela é versionada com `git commit` e enviada (`git push`) para o mesmo branch para que serviços como Railway ou Supabase possam sincronizar o código.
 - Para trazer a versão mais recente em outra máquina, execute `git fetch origin work && git checkout work && git pull`.

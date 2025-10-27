@@ -1,3 +1,4 @@
+// Atualização 2025-10: função recriada após restauração do repositório.
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+// Página recriada em 2025-10 após restauração do repositório.
 import { supabaseTenant } from '@/lib/supabase-tenant';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';

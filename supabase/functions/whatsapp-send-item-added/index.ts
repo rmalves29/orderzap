@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+// Template "Item Adicionado" revalidado em 2025-10 após restauração do repositório.
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',

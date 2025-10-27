@@ -1,5 +1,4 @@
--- Corrige telefones de pedidos/carrinhos manuais aplicando a regra regional do nono dígito
--- e disponibiliza função utilitária para futuras correções.
+-- Revisado em 2025-10 após recriação do pacote de migrações.
 
 CREATE OR REPLACE FUNCTION public.normalize_bazar_phone(phone text)
 RETURNS text

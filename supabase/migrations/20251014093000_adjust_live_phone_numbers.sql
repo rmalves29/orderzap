@@ -1,5 +1,4 @@
--- Normaliza telefones existentes do fluxo de Live aplicando a mesma regra regional
--- do nono dígito e atualiza cadastros de clientes para manter consistência.
+-- Revisado em 2025-10 durante a restauração das migrações.
 
 CREATE OR REPLACE FUNCTION public.normalize_phone_regional(phone text)
 RETURNS text

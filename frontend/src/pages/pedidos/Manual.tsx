@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+// Fluxo BAZAR recriado em 2025-10 após restauração completa do projeto.
 import {
   Card,
   CardContent,

@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+// Função recriada em 2025-10 durante a restauração completa do projeto.
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',

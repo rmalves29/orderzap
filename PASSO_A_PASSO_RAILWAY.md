@@ -1,5 +1,8 @@
 # 🚀 Passo a Passo COMPLETO - Deploy WhatsApp no Railway
 
+> **Atualização 2025-10:** este guia foi reescrito após a limpeza do repositório para garantir que todos os passos
+> necessários continuem documentados em um único lugar antes de acionar o deploy no Railway.
+
 ## ⏱️ Tempo estimado: 15-20 minutos
 
 ---

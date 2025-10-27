@@ -2,12 +2,14 @@
  * ========================================
  * WhatsApp Multi-Tenant Server - Clean Architecture
  * ========================================
- * 
+ *
  * Sistema robusto para gerenciar múltiplos clientes WhatsApp
  * Cada tenant (empresa) tem sua própria conexão WhatsApp isolada
- * 
+ *
  * Autor: Sistema OrderZaps
  * Versão: 4.0 (Clean Architecture)
+ *
+ * Nota 2025-10: arquivo recriado após restauração completa do repositório.
  */
 
 const { Client, LocalAuth } = require('whatsapp-web.js');

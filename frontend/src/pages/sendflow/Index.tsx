@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+// Reimplementado em 2025-10 após a limpeza do repositório.
 import {
   Card,
   CardContent,

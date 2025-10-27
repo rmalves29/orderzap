@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+// Tela de conexão atualizada em 2025-10 após recriação do repositório.
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
