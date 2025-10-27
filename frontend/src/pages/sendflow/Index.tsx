@@ -1,4 +1,3 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
 diff --git a/frontend/src/pages/sendflow/Index.tsx b/frontend/src/pages/sendflow/Index.tsx
 index f2588dd0b5411676573ecbb286b96d4f2ba7791c..5e2f3500bfc9cfe722006ce82f6ca19284cb36a6 100644
 --- a/frontend/src/pages/sendflow/Index.tsx
@@ -592,6 +591,3 @@ index f2588dd0b5411676573ecbb286b96d4f2ba7791c..5e2f3500bfc9cfe722006ce82f6ca192
                    <CheckCircle2 className="h-5 w-5 text-green-500" />
                    Envio concluído!
                  </>
- 
-EOF
-)
