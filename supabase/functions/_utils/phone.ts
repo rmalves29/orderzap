@@ -7,19 +7,29 @@ export function normalizeForStorage(phone: string): string {
     clean = clean.substring(2);
   }
 
-  // Se tem 10 dígitos, adicionar 9º dígito após o DDD
+  // Aplicar regra do 9º dígito baseada no DDD:
+  // - Se DDD < 31: incluir o 9º dígito caso não exista (passar de 10 → 11)
+  // - Se DDD >= 31: remover o 9º dígito caso exista (passar de 11 → 10)
   if (clean.length === 10) {
-    const ddd = clean.substring(0, 2);
-    const number = clean.substring(2);
-    clean = ddd + '9' + number;
+    const ddd = parseInt(clean.substring(0, 2), 10);
+    if (!isNaN(ddd) && ddd < 31) {
+      // incluir 9
+      clean = clean.substring(0, 2) + '9' + clean.substring(2);
+    }
+    // se DDD >= 31 e tem 10 dígitos, mantemos como está (não inserir o 9)
+  } else if (clean.length === 11) {
+    const ddd = parseInt(clean.substring(0, 2), 10);
+    if (!isNaN(ddd) && ddd >= 31 && clean[2] === '9') {
+      // remover 9
+      clean = clean.substring(0, 2) + clean.substring(3);
+    }
   }
 
-  // Se já tem 11 dígitos, assume que está correto
   return clean;
 }
 
 export function normalizeForWhatsApp(phone: string): string {
   const storage = normalizeForStorage(phone) || '';
-  // Prefixar DDI 55 para envio
+  // Prefixar DDI 55 para envio (sem sufixo @s.whatsapp.net — o servidor faz o sufixo)
   return '55' + storage;
 }
