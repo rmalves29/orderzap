@@ -1,4 +1,4 @@
- /**
+/**
  * ========================================
  * WhatsApp Multi-Tenant Server - Clean Architecture
  * ========================================
@@ -369,11 +369,23 @@ class SupabaseHelper {
 
   static async logMessage(tenantId, phone, message, type, metadata = {}) {
     try {
+      let phoneForDb = phone;
+      try {
+        if (typeof phone === 'string' && !phone.includes('@')) {
+          // Tentar normalizar para formato de armazenamento (sem DDI duplicado)
+          // Reaproveita a função normalizePhone que já retorna com DDI 55
+          phoneForDb = normalizePhone(phone).replace(/^55/, '55');
+        }
+      } catch (e) {
+        console.warn('⚠️ Falha ao normalizar telefone para DB (server-multitenant-clean):', e.message || e);
+        phoneForDb = phone;
+      }
+
       await this.request('/whatsapp_messages', {
         method: 'POST',
         body: JSON.stringify({
           tenant_id: tenantId,
-          phone,
+          phone: phoneForDb,
           message,
           type,
           sent_at: type === 'outgoing' ? new Date().toISOString() : null,
@@ -620,6 +632,100 @@ async function createApp(tenantManager) {
       res.status(500).json({
         success: false,
         error: error.message || 'Erro ao enviar mensagem'
+      });
+    }
+  });
+
+  // Endpoint: Adicionar Produto e Enviar Mensagem via WhatsApp
+  // Recebe: { tenantId, productName, phone, extraMessage? }
+  app.post('/add-product', async (req, res) => {
+    try {
+      const { tenantId, productName, phone, extraMessage } = req.body;
+
+      if (!tenantId || !productName || !phone) {
+        return res.status(400).json({
+          success: false,
+          error: 'tenantId, productName e phone são obrigatórios.'
+        });
+      }
+
+      // Buscar cliente online do tenant
+      const client = await tenantManager.getOnlineClient(tenantId);
+      if (!client) {
+        const statusInfo = tenantManager.getTenantStatus(tenantId);
+        return res.status(503).json({
+          success: false,
+          error: 'Cliente WhatsApp não conectado para este tenant.',
+          status: statusInfo.status
+        });
+      }
+
+      // Normalizar telefone e construir chatId
+      const normalizedPhone = normalizePhone(phone);
+      const chatId = `${normalizedPhone}@c.us`;
+
+      // Montar mensagem padrão (pode ser customizada pelo caller)
+      const baseMessage = `🛒 Pedido atualizado: produto adicionado -> ${productName}`;
+      const message = extraMessage ? `${baseMessage}\n${extraMessage}` : baseMessage;
+
+      // Enviar mensagem
+      try {
+        await client.sendMessage(chatId, message);
+        console.log(`✅ [add-product] Mensagem enviada para ${normalizedPhone} (tenant ${tenantId})`);
+      } catch (sendErr) {
+        console.error('❌ Falha ao enviar mensagem em /add-product:', sendErr.message || sendErr);
+        return res.status(500).json({ success: false, error: 'Falha ao enviar mensagem via WhatsApp.' });
+      }
+
+      // Logar no Supabase (não bloquear resposta)
+      SupabaseHelper.logMessage(tenantId, normalizedPhone, message, 'outgoing').catch(err =>
+        console.error('⚠️ Falha ao logar mensagem (add-product):', err.message || err)
+      );
+
+      return res.json({ success: true, message: 'Produto adicionado e mensagem enviada.' });
+    } catch (error) {
+      console.error('❌ Erro no /add-product:', error);
+      return res.status(500).json({ success: false, error: 'Erro interno ao processar add-product.' });
+    }
+  });
+
+  // Endpoint: Adicionar Produto e Enviar Mensagem
+  app.post('/add-product', async (req, res) => {
+    try {
+      const { tenantId, productName, phone } = req.body;
+
+      if (!tenantId || !productName || !phone) {
+        return res.status(400).json({
+          success: false,
+          error: 'Tenant ID, nome do produto e telefone são obrigatórios.'
+        });
+      }
+
+      const client = await tenantManager.getOnlineClient(tenantId);
+
+      if (!client) {
+        return res.status(503).json({
+          success: false,
+          error: 'Cliente WhatsApp não está conectado.'
+        });
+      }
+
+      const normalizedPhone = normalizePhone(phone);
+      const chatId = `${normalizedPhone}@c.us`;
+      const message = `Novo produto adicionado: ${productName}`;
+
+      await client.sendMessage(chatId, message);
+      await SupabaseHelper.logMessage(tenantId, normalizedPhone, message, 'outgoing');
+
+      res.json({
+        success: true,
+        message: 'Produto adicionado e mensagem enviada com sucesso.'
+      });
+    } catch (error) {
+      console.error('Erro ao adicionar produto e enviar mensagem:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Erro interno ao adicionar produto.'
       });
     }
   });
