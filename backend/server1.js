@@ -1,6 +1,8 @@
 // Carregar variáveis de ambiente do arquivo .env
 import dotenv from 'dotenv';
-import baileys from '@whiskeysockets/baileys';
+// Importar Baileys com os nomes corretos (named imports garantem que
+// useMultiFileAuthState e outras funções sejam carregadas corretamente)
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys';
 import express from 'express';
 import cors from 'cors';
 import qrcode from 'qrcode-terminal';
@@ -17,13 +19,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-} = baileys;
+// Nota: usamos named imports diretamente do pacote @whiskeysockets/baileys
 
 dotenv.config({
   path: path.join(projectRoot, '.env'),
@@ -68,16 +64,36 @@ if (!fs.existsSync(AUTH_DIR)) {
   }
 } else {
   console.log(`✅ Diretório de autenticação já existe: ${AUTH_DIR}`);
+  console.log(`✅ Diretório de autenticação já existe: ${AUTH_DIR}`);
+
 }
 
-// Logger do Pino (silencioso)
-const logger = P({ level: 'silent' });
+// Logger do Pino - nível configurável via env LOG_LEVEL (debug|info|warn|error|silent)
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+// Habilitar pino-pretty se desejar (defina PINO_PRETTY=true no env)
+const USE_PINO_PRETTY = (process.env.PINO_PRETTY === 'true');
+let logger;
+try {
+  if (USE_PINO_PRETTY) {
+    logger = P({ level: LOG_LEVEL, transport: { target: 'pino-pretty', options: { colorize: true } } });
+  } else {
+    logger = P({ level: LOG_LEVEL });
+  }
+} catch (err) {
+  console.error('⚠️ Falha ao inicializar pino-pretty, usando logger padrão:', err.message);
+  logger = P({ level: LOG_LEVEL });
+}
+console.log(`🔍 Logger inicializado (level=${LOG_LEVEL}, pretty=${USE_PINO_PRETTY})`);
+
+// Configuração para imprimir QR no terminal (padrão: true para facilitar testes locais)
+const PRINT_QR_IN_TERMINAL = process.env.PRINT_QR_IN_TERMINAL !== 'false';
 
 // ==================== TENANT MANAGER ====================
 class TenantManager {
-  constructor() {
+  constructor(supabaseHelper) {
     this.clients = new Map(); // Map<tenantId, { sock, status, qr, tenant, authState }>
     this.messageQueue = new WhatsAppQueue(); // Sistema de fila para envio
+    this.supabaseHelper = supabaseHelper; // injetado após criação do SupabaseHelper
   }
 
   async createClient(tenant) {
@@ -110,8 +126,21 @@ class TenantManager {
 
       // Estado de autenticação
       console.log(`🔑 Carregando estado de autenticação...`);
-      const { state, saveCreds } = await useMultiFileAuthState(authPath);
-      console.log(`✅ Estado de autenticação carregado`);
+      let state, saveCreds;
+      try {
+        if (typeof useMultiFileAuthState !== 'function') {
+          throw new Error('useMultiFileAuthState não está disponível. Verifique a versão de @whiskeysockets/baileys e reinstale as dependências.');
+        }
+        ({ state, saveCreds } = await useMultiFileAuthState(authPath));
+        console.log(`✅ Estado de autenticação carregado`);
+      } catch (err) {
+        console.error('❌ Falha ao carregar estado de autenticação via useMultiFileAuthState:');
+        console.error('   Mensagem:', err.message);
+        console.error('   Dica: No diretório backend execute:');
+        console.error('     npm install @whiskeysockets/baileys dotenv');
+        console.error('   Ou use pnpm: pnpm install');
+        throw err;
+      }
       
       // Buscar versão mais recente do Baileys
       console.log(`🔍 Buscando versão do Baileys...`);
@@ -134,10 +163,29 @@ class TenantManager {
       const sock = makeWASocket({
         version,
         logger,
-        printQRInTerminal: false,
+        printQRInTerminal: PRINT_QR_IN_TERMINAL,
         auth: {
           creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, logger),
+          // makeCacheableSignalKeyStore foi introduzido em versões recentes do Baileys;
+          // se não existir, criar um keyStore simples que implementa `get`/`set`/`all`
+          keys: (typeof makeCacheableSignalKeyStore === 'function')
+            ? makeCacheableSignalKeyStore(state.keys, logger)
+            : (function createSimpleKeyStore(initialKeys) {
+                const store = Object.assign({}, initialKeys || {});
+                return {
+                  get: async (key) => {
+                    return store[key] || null;
+                  },
+                  set: async (key, value) => {
+                    store[key] = value;
+                  },
+                  remove: async (key) => {
+                    delete store[key];
+                  },
+                  // útil para debug
+                  all: async () => Object.assign({}, store),
+                };
+              })(state.keys),
         },
         browser: ['OrderZaps', 'Chrome', '120.0.0'],
         markOnlineOnConnect: true,
@@ -182,24 +230,17 @@ class TenantManager {
         clientData.qr = null;
 
         // Tratar cada tipo de desconexão
-        if (statusCode === DisconnectReason.loggedOut) {
-          console.log(`🔴 LOGOUT (401) - limpando sessão...`);
-          
-          try {
-            if (fs.existsSync(authPath)) {
-              fs.rmSync(authPath, { recursive: true, force: true });
-              console.log(`🧹 Sessão removida`);
-            }
-          } catch (error) {
-            console.error(`⚠️ Erro ao limpar sessão:`, error.message);
-          }
-          
-          this.clients.delete(tenantId);
-          
-          console.log(`📱 Reiniciando para gerar novo QR Code em 3s...`);
-          setTimeout(() => this.createClient(tenant), 3000);
-          
-        } else if (statusCode === DisconnectReason.restartRequired) {
+                    if (statusCode === DisconnectReason.loggedOut) {
+                        // LOGOUT (401): evitar comportamento destrutivo automático durante depuração.
+                        // Em vez de apagar a sessão e reiniciar, marcamos como 'logged_out'
+                        // e aguardamos ação manual (/reset/:tenantId) para regenerar o QR.
+                        console.log(`🔴 LOGOUT (401) detectado para ${tenant.name} - entrando em modo 'logged_out' (não apagando sessão automaticamente)`);
+                        clientData.status = 'logged_out';
+                        clientData.qr = null;
+                        // Notificar no log instruções para o operador
+                        console.log(`ℹ️ Para reconectar: acesse http://localhost:${PORT}/reset/${tenantId} ou remova manualmente a pasta de sessão: ${authPath}`);
+                        // Não deletar client automaticamente aqui — evita loop de criação/apagamento.
+                    } else if (statusCode === DisconnectReason.restartRequired) {
           console.log(`🔄 RESTART NECESSÁRIO (515) - reconectando em 2s...`);
           this.clients.delete(tenantId);
           setTimeout(() => this.createClient(tenant), 2000);
@@ -272,7 +313,26 @@ class TenantManager {
         }
         
         console.log(`${'='.repeat(70)}`);
-        console.log(`✅ ${tenant.name} pode enviar e receber mensagens!`);
+         console.log(`✅ ${tenant.name} pode enviar e receber mensagens!`);
+
+        // Se houver mensagens pendentes na fila, tentar retomar processamento
+        try {
+          const pending = this.messageQueue.getQueueSize(tenantId);
+          const isProcessing = !!this.messageQueue.processing.get(tenantId);
+          if (pending > 0 && !isProcessing) {
+            console.log(`🔁 [Queue] Há ${pending} mensagens pendentes para ${tenant.name}. Tentando retomar processamento...`);
+            // Processar em background
+            setImmediate(() => {
+              this.processQueueForTenant(tenantId).catch(err => {
+                console.error('❌ Erro ao retomar fila após conexão:', err);
+              });
+            });
+          }
+        } catch (err) {
+          console.error('⚠️ Erro ao verificar fila pendente após conexão:', err);
+        }
+
+  
         console.log(`${'='.repeat(70)}\n`);
       } else if (connection === 'connecting') {
         console.log(`🔄 ${tenant.name} - Conectando...`);
@@ -312,15 +372,54 @@ class TenantManager {
 
       return sock;
 
-    } catch (error) {
+      } catch (error) {
       console.error(`❌ ERRO AO INICIALIZAR CLIENTE:`);
       console.error(`   Tipo: ${error.name}`);
       console.error(`   Mensagem: ${error.message}`);
       console.error(`   Stack:`, error.stack);
       console.log(`${'='.repeat(70)}\n`);
-      throw error;
+      // Marcar status de erro e retornar sem finalizar o processo
+      this.status.set(tenantId, 'error');
+      return null;
     }
   }
+
+    /**
+     * Inicia o processamento da fila para um tenant usando as funções
+     * de envio e validação que dependem do contexto do TenantManager
+     */
+    async processQueueForTenant(tenantId) {
+      if (!this.supabaseHelper) {
+        console.warn('⚠️ SupabaseHelper não disponível em TenantManager.processQueueForTenant');
+        return;
+      }
+
+      const sendFunction = async (msg) => {
+        const sock = this.getOnlineClient(tenantId);
+        if (!sock) {
+          throw new Error('WhatsApp desconectado');
+        }
+
+        console.log(`📤 [Queue] Enviando para ${msg.groupId}`);
+        await sock.sendMessage(msg.groupId, { text: msg.message });
+
+        // Registrar no Supabase
+        await this.supabaseHelper.logMessage(
+          tenantId,
+          msg.groupId,
+          msg.message,
+          'sendflow',
+          { whatsapp_group_name: msg.groupId, product_name: msg.productName }
+        );
+      };
+
+      const validationFunction = async (tid) => {
+        // Usar validação rápida/getOnlineClient para decidir se pode enviar
+        return !!this.getOnlineClient(tid);
+      };
+
+      await this.messageQueue.processQueue(tenantId, sendFunction, validationFunction);
+    }
 
   async handleIncomingMessage(tenantId, msg, messageText) {
     const clientData = this.clients.get(tenantId);
@@ -662,11 +761,22 @@ class SupabaseHelper {
 
   async logMessage(tenantId, phone, message, type, metadata = {}) {
     try {
+      // Normalizar apenas quando for um número de telefone (não aplicar para IDs de grupo como xxxxx@g.us)
+      let phoneForDb = phone;
+      try {
+        if (typeof phone === 'string' && !phone.includes('@')) {
+          phoneForDb = ensureDbPhoneDigits(phone);
+        }
+      } catch (e) {
+        console.warn('⚠️ Falha ao normalizar telefone para DB, usando valor original:', phone, e.message || e);
+        phoneForDb = phone;
+      }
+
       await this.request('/rest/v1/whatsapp_messages', {
         method: 'POST',
         body: JSON.stringify({
           tenant_id: tenantId,
-          phone,
+          phone: phoneForDb,
           message,
           type,
           sent_at: new Date().toISOString(),
@@ -828,15 +938,18 @@ function normalizePhone(phone) {
     return '55' + clean + '@s.whatsapp.net';
   }
   
-  // Aplica regra do 9º dígito para envio
-  if (ddd <= 11) {
-    // Norte/Nordeste: Se tem 10 dígitos, ADICIONA o 9º dígito
+  // Aplica regra do 9º dígito para envio (regra fornecida pelo cliente):
+  // - Se DDD < 31: deve INCLUIR o 9º dígito (caso não exista)
+  // - Se DDD >= 31: deve REMOVER o 9º dígito (caso exista)
+  if (ddd < 31) {
+    // Se tem 10 dígitos, ADICIONA o 9º dígito
     if (clean.length === 10) {
       clean = clean.substring(0, 2) + '9' + clean.substring(2);
-      console.log('📤 9º dígito ADICIONADO para envio (DDD ≤ 11):', phone, '→', clean);
+      console.log('📤 9º dígito ADICIONADO para envio (DDD < 31):', phone, '→', clean);
     }
-  } else if (ddd >= 31) {
-    // Sudeste/Sul/Centro-Oeste: Se tem 11 dígitos e começa com 9, REMOVE o 9º dígito
+  } else {
+    // DDD >= 31
+    // Se tem 11 dígitos e o terceiro caractere é '9', REMOVE o 9º dígito
     if (clean.length === 11 && clean[2] === '9') {
       clean = clean.substring(0, 2) + clean.substring(3);
       console.log('📤 9º dígito REMOVIDO para envio (DDD ≥ 31):', phone, '→', clean);
@@ -844,6 +957,31 @@ function normalizePhone(phone) {
   }
   
   return '55' + clean + '@s.whatsapp.net';
+}
+
+/**
+ * Garante que o telefone salvo no banco contenha sempre o 9º dígito
+ * e comece com o DDI 55. Retorna apenas dígitos (ex: 55119xxxxxxx).
+ */
+function ensureDbPhoneDigits(phone) {
+  if (!phone) return phone;
+  let clean = String(phone).replace(/\D/g, '');
+
+  // garantir DDI
+  if (!clean.startsWith('55')) {
+    clean = '55' + clean;
+  }
+
+  // pegar parte nacional (após DDI)
+  let national = clean.substring(2);
+
+  // se tiver 10 dígitos (sem 9), adicionar 9 após DDD
+  if (national.length === 10) {
+    national = national.substring(0, 2) + '9' + national.substring(2);
+  }
+
+  // se já tiver 11, assume que já contém o 9º dígito
+  return '55' + national;
 }
 
 function delay(ms) {
@@ -1288,19 +1426,13 @@ function createApp(tenantManager, supabaseHelper) {
       });
     }
 
-    // Validar sessão primeiro
-    const validation = await tenantManager.validateSession(tenantId);
-    if (!validation.valid) {
-      console.log(`❌ Sessão inválida: ${validation.reason}`);
-      console.log(`${'='.repeat(70)}\n`);
-      return res.status(503).json({ 
-        success: false, 
-        error: 'WhatsApp não conectado ou sessão inválida',
-        details: validation.reason
-      });
-    }
-
-    console.log(`✅ Sessão válida - Adicionando ${messages.length} mensagens à fila`);
+      // Não bloquear enfileiramento caso a sessão esteja temporariamente indisponível.
+      const isOnline = !!tenantManager?.getOnlineClient(tenantId);
+      if (!isOnline) {
+        console.log(`⚠️ Sessão não online no momento; as mensagens serão enfileiradas e enviadas quando o WhatsApp reconectar`);
+      } else {
+        console.log(`✅ Sessão online - adicionando ${messages.length} mensagens à fila`);
+      }
 
     // Adicionar todas as mensagens na fila
     messages.forEach(msg => {
@@ -1321,37 +1453,13 @@ function createApp(tenantManager, supabaseHelper) {
       queueSize: tenantManager.messageQueue.getQueueSize(tenantId)
     });
 
-    // Iniciar processamento da fila (assíncrono)
-    setImmediate(async () => {
-      const sendFunction = async (msg) => {
-        const sock = tenantManager.getOnlineClient(tenantId);
-        if (!sock) {
-          throw new Error('WhatsApp desconectado');
-        }
-
-        console.log(`📤 [Queue] Enviando para ${msg.groupId}`);
-        await sock.sendMessage(msg.groupId, { text: msg.message });
-
-        // Registrar no banco
-        await supabaseHelper.logMessage(
-          tenantId,
-          msg.groupId,
-          msg.message,
-          'sendflow',
-          { whatsapp_group_name: msg.groupId, product_name: msg.productName }
-        );
-      };
-
-      const validationFunction = async (tid) => {
-        const validation = await tenantManager.validateSession(tid);
-        return validation.valid;
-      };
-
-      await tenantManager.messageQueue.processQueue(
-        tenantId,
-        sendFunction,
-        validationFunction
-      );
+    // Iniciar processamento da fila (assíncrono) - TenantManager centraliza lógica de envio
+    setImmediate(() => {
+      if (tenantManager) {
+        tenantManager.processQueueForTenant(tenantId).catch(err => {
+          console.error('❌ Erro ao processar fila (processQueueForTenant):', err);
+        });
+      }
     });
   });
 
@@ -1404,7 +1512,7 @@ function createApp(tenantManager, supabaseHelper) {
 }
 
 // ==================== ENCERRAMENTO GRACIOSO ====================
-const tenantManager = new TenantManager();
+let tenantManager = null;
 let cartMonitor = null;
 
 process.on('uncaughtException', (error) => {
@@ -1466,6 +1574,9 @@ async function main() {
 
   const supabaseHelper = new SupabaseHelper(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
+  // Criar TenantManager após supabaseHelper para injetar dependência
+  tenantManager = new TenantManager(supabaseHelper);
+
   const allTenants = await supabaseHelper.loadActiveTenants();
   let tenants = allTenants;
 
@@ -1515,7 +1626,23 @@ async function main() {
   console.log('   que é chamada automaticamente pela whatsapp-process-message\n');
 }
 
-main().catch(error => {
-  console.error('❌ Erro fatal:', error);
-  process.exit(1);
-});
+// Tornar a inicialização resiliente: em vez de sair no primeiro erro,
+// tentamos reiniciar em loop com backoff. Isso evita que o processo
+// finalize imediatamente quando houver problemas temporários (ex: falha
+// ao criar cliente, logout inesperado etc.).
+async function startWithRetry() {
+  while (true) {
+    try {
+      await main();
+      // Se main retorna (servidor finalizado intencionalmente), quebramos o loop
+      break;
+    } catch (error) {
+      console.error('❌ Erro fatal na inicialização (servidor continuará tentando):', error);
+      console.log('🔁 Tentando reiniciar em 5 segundos...');
+      // esperar antes de tentar novamente
+      await delay(5000);
+    }
+  }
+}
+
+startWithRetry();
