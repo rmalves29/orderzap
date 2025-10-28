@@ -395,7 +395,13 @@ class TenantManager {
       }
 
       const sendFunction = async (msg) => {
-        const sock = this.getOnlineClient(tenantId);
+        let sock = this.getOnlineClient(tenantId);
+        if (!sock) {
+          console.log(`⚠️ [Queue] getOnlineClient retornou null para tenant ${tenantId}. Tentando getAuthenticatedClient como fallback...`);
+          sock = this.getAuthenticatedClient(tenantId);
+          if (sock) console.log('⚠️ [Queue] Fallback getAuthenticatedClient bem-sucedido (envio).');
+        }
+
         if (!sock) {
           throw new Error('WhatsApp desconectado');
         }
@@ -1486,7 +1492,16 @@ function createApp(tenantManager, supabaseHelper) {
       });
     }
 
-    const sock = tenantManager.getOnlineClient(tenantId);
+    let sock = tenantManager.getOnlineClient(tenantId);
+    if (!sock) {
+      // Fallback: tentar obter cliente autenticado (menos restritivo) para permitir envio
+      console.log(`⚠️ getOnlineClient retornou null para tenant ${tenantId}. Tentando getAuthenticatedClient como fallback...`);
+      sock = tenantManager.getAuthenticatedClient(tenantId);
+      if (sock) {
+        console.log(`⚠️ Fallback para getAuthenticatedClient bem-sucedido (envio com menor verificação).`);
+      }
+    }
+
     if (!sock) {
       const clientData = tenantManager.clients.get(tenantId);
       const currentStatus = clientData?.status || 'não inicializado';
@@ -1733,7 +1748,13 @@ function createApp(tenantManager, supabaseHelper) {
       });
     }
 
-    const sock = tenantManager.getOnlineClient(tenantId);
+    let sock = tenantManager.getOnlineClient(tenantId);
+    if (!sock) {
+      console.log(`⚠️ getOnlineClient retornou null para tenant ${tenantId} (endpoint /send). Tentando getAuthenticatedClient como fallback...`);
+      sock = tenantManager.getAuthenticatedClient(tenantId);
+      if (sock) console.log('⚠️ Fallback getAuthenticatedClient bem-sucedido (endpoint /send).');
+    }
+
     if (!sock) {
       const clientData = tenantManager.clients.get(tenantId);
       return res.status(503).json({ 
