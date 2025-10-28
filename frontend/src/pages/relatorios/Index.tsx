@@ -385,22 +385,25 @@ const Relatorios = () => {
 
   const loadWhatsAppGroupStats = async () => {
     try {
-      // Buscar mapeamento de códigos de grupo para nomes amigáveis
+      // Buscar mapeamento de grupos (por id e por whatsapp_group_name) para nomes amigáveis
       const { data: groupMappings } = await supabaseTenant
         .from('customer_whatsapp_groups')
-        .select('whatsapp_group_name, group_display_name')
+        .select('id, whatsapp_group_name, group_display_name')
         .order('created_at', { ascending: true });
-      
-      // Criar mapa de código do grupo para nome amigável
-      const groupNameMap = new Map<string, string>();
+
+      // Criar mapas de lookup por whatsapp_group_name e por id
+      const groupNameByCode = new Map<string, string>();
+      const groupNameById = new Map<string, string>();
       if (groupMappings) {
         for (const mapping of groupMappings) {
           const groupCode = mapping.whatsapp_group_name;
-          if (groupCode && !groupNameMap.has(groupCode)) {
-            // Usar o nome amigável do grupo se disponível
-            const displayName = mapping.group_display_name || 
-                               `Grupo ${groupCode.split('@')[0].slice(-8)}`;
-            groupNameMap.set(groupCode, displayName);
+          const gid = mapping.id;
+          const displayName = mapping.group_display_name || (groupCode ? `Grupo ${groupCode.split('@')[0].slice(-8)}` : `Grupo ${gid?.toString().slice(-8)}`);
+          if (groupCode && !groupNameByCode.has(groupCode)) {
+            groupNameByCode.set(groupCode, displayName);
+          }
+          if (gid && !groupNameById.has(gid)) {
+            groupNameById.set(gid, displayName);
           }
         }
       }
@@ -477,25 +480,27 @@ const Relatorios = () => {
 
       // Processar cada pedido e agrupar por grupo WhatsApp
       orders?.forEach(order => {
-        // Determinar código do grupo - priorizar do pedido, depois do carrinho
-        let groupCode = order.whatsapp_group_name || 
-                        order.carts?.whatsapp_group_name || 
-                        'Sem Grupo';
-        
-        // Extrair nome amigável do grupo
-        let groupName = groupCode;
-        
-        if (groupCode && groupCode !== 'Sem Grupo') {
-          if (groupCode.includes('@g.us')) {
-            // Tentar usar nome mapeado ou criar nome amigável a partir do ID
-            groupName = groupNameMap.get(groupCode) || `Grupo ${groupCode.split('@')[0].slice(-8)}`;
+        // Determinar código do grupo - priorizar whatsapp_group_id (uuid) -> depois whatsapp_group_name -> depois cart
+        let groupCode = order.whatsapp_group_name || order.carts?.whatsapp_group_name || 'Sem Grupo';
+        let groupId = (order as any).whatsapp_group_id || order.carts?.whatsapp_group_id || null;
+
+        // Extrair nome amigável do grupo: preferir lookup por id, depois por code, caso contrário fallback
+        let groupName = 'Sem Grupo';
+        if (groupId && groupNameById.has(groupId)) {
+          groupName = groupNameById.get(groupId)!;
+        } else if (groupCode && groupCode !== 'Sem Grupo') {
+          if (groupNameByCode.has(groupCode)) {
+            groupName = groupNameByCode.get(groupCode)!;
+          } else if (groupCode.includes('@g.us')) {
+            groupName = `Grupo ${groupCode.split('@')[0].slice(-8)}`;
           } else if (groupCode.includes('-')) {
-            // Se já é um ID de grupo sem @g.us, usar últimos 8 dígitos
-            groupName = groupNameMap.get(groupCode) || `Grupo ${groupCode.slice(-8)}`;
+            groupName = `Grupo ${groupCode.slice(-8)}`;
+          } else {
+            groupName = groupCode;
           }
         }
         
-        console.log(`📞 Pedido ${order.id} - Grupo Code: ${groupCode} - Nome: ${groupName}`);
+  console.log(`📞 Pedido ${order.id} - Grupo ID: ${groupId} - Grupo Code: ${groupCode} - Nome: ${groupName}`);
         
         const amount = Number(order.total_amount);
         const items = cartItemsMap.get(order.cart_id) || [];
