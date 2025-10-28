@@ -232,6 +232,19 @@ serve(async (req) => {
             console.error('Error updating free order:', orderError);
           } else {
             console.log('Free order updated successfully:', orderData);
+            // Enviar confirmação de pagamento via edge function (pedido gratuito)
+            try {
+              await supabase.functions.invoke('whatsapp-send-paid-order', {
+                body: {
+                  tenant_id: existingOrder.tenant_id,
+                  order_id: existingOrder.id,
+                  customer_phone: normalizeForStorage(customerData.phone),
+                  total: 0
+                }
+              });
+            } catch (e) {
+              console.error('Erro ao chamar whatsapp-send-paid-order (existing free order):', e);
+            }
           }
         } else {
           // Cria novo pedido
@@ -253,6 +266,20 @@ serve(async (req) => {
             console.error('Error saving free order:', orderError);
           } else {
             console.log('Free order saved successfully:', orderData);
+            // Após criar pedido gratuito, enviar confirmação via edge function
+            try {
+              await supabase.functions.invoke('whatsapp-send-paid-order', {
+                body: {
+                  tenant_id: tenant_id,
+                  order_id: orderData.id,
+                  customer_phone: normalizeForStorage(customerData.phone),
+                  total: 0
+                }
+              });
+            } catch (e) {
+              console.error('Erro ao chamar whatsapp-send-paid-order (new free order):', e);
+            }
+          }
           }
         }
       } catch (error) {
