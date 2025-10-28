@@ -1253,6 +1253,86 @@ function createApp(tenantManager, supabaseHelper) {
     });
   });
 
+  // ADMIN: Corrigir telefones salvos no banco para incluir/remover 9º dígito seguindo regra
+  // Aceita opcionalmente header x-tenant-id ou query ?tenant_id=<id>
+  app.post('/admin/fix-phones', async (req, res) => {
+    const { tenantId } = req;
+    console.log('\n' + '='.repeat(70));
+    console.log('🔧 INICIANDO FIX DE TELEFONES NO BANCO');
+    console.log('🏢 Tenant filter:', tenantId || 'NENHUM (todos)');
+    console.log('='.repeat(70) + '\n');
+
+    const tables = [
+      { name: 'carts', field: 'customer_phone' },
+      { name: 'orders', field: 'customer_phone' },
+      { name: 'whatsapp_messages', field: 'phone' },
+      { name: 'customer_whatsapp_groups', field: 'customer_phone' }
+    ];
+
+    const summary = {};
+
+    try {
+      for (const t of tables) {
+        console.log(`🔎 Processando tabela: ${t.name} (campo: ${t.field})`);
+
+        let path = `/rest/v1/${t.name}?select=id,${t.field}`;
+        if (tenantId) {
+          path += `&tenant_id=eq.${tenantId}`;
+        }
+
+        // Limite razoável para evitar travar - pode ser ajustado
+        path += '&limit=1000';
+
+        const rows = await supabaseHelper.request(path);
+        if (!Array.isArray(rows)) {
+          console.log(`⚠️ Nenhum registro retornado para ${t.name}`);
+          summary[t.name] = { scanned: 0, updated: 0 };
+          continue;
+        }
+
+        let scanned = 0;
+        let updated = 0;
+
+        for (const row of rows) {
+          scanned++;
+          const original = row[t.field];
+          if (!original) continue;
+
+          let fixed;
+          try {
+            fixed = ensureDbPhoneDigits(String(original));
+          } catch (err) {
+            console.warn(`⚠️ Falha ao normalizar telefone (id=${row.id})`, err.message || err);
+            continue;
+          }
+
+          if (!fixed || fixed === original) continue;
+
+          // Atualizar registro
+          try {
+            await supabaseHelper.request(`/rest/v1/${t.name}?id=eq.${row.id}`, {
+              method: 'PATCH',
+              body: JSON.stringify({ [t.field]: fixed })
+            });
+            updated++;
+            console.log(`✅ Atualizado ${t.name} id=${row.id}: ${original} → ${fixed}`);
+          } catch (err) {
+            console.error(`❌ Erro ao atualizar ${t.name} id=${row.id}:`, err.message || err);
+          }
+        }
+
+        summary[t.name] = { scanned, updated };
+        console.log(`🔁 Tabela ${t.name} - scanned=${scanned} updated=${updated}\n`);
+      }
+
+      console.log('🎉 FIX DE TELEFONES CONCLUÍDO');
+      return res.json({ success: true, summary });
+    } catch (error) {
+      console.error('❌ Erro no fix de telefones:', error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   app.post('/send-group', async (req, res) => {
     const { tenantId } = req;
     const { groupId, message } = req.body;
