@@ -1506,57 +1506,112 @@ function createApp(tenantManager, supabaseHelper) {
   // Nova rota: SendFlow com fila de mensagens (batch)
   app.post('/sendflow-batch', async (req, res) => {
     const { tenantId } = req;
-    const { messages } = req.body; // Array de { groupId, message, productName }
+    const body = req.body || {};
 
     console.log(`\n${'='.repeat(70)}`);
     console.log(`📦 SENDFLOW BATCH - Recebendo lote de mensagens`);
     console.log(`${'='.repeat(70)}`);
     console.log(`🏢 Tenant ID: ${tenantId}`);
-    console.log(`📨 Total de mensagens: ${messages?.length || 0}`);
 
-    if (!tenantId || !messages || !Array.isArray(messages) || messages.length === 0) {
-      console.log(`❌ Parâmetros inválidos`);
+    // Backward compatibility: if 'messages' array provided, keep previous behavior
+    if (Array.isArray(body.messages) && body.messages.length > 0) {
+      const messages = body.messages;
+      console.log(`📨 Total de mensagens (legacy): ${messages.length}`);
+
+      messages.forEach(msg => {
+        tenantManager.messageQueue.enqueue(tenantId, {
+          groupId: msg.groupId,
+          message: msg.message,
+          productName: msg.productName || 'N/A'
+        });
+      });
+
+      console.log(`✅ ${messages.length} mensagens adicionadas à fila (legacy)`);
+
+      res.json({ 
+        success: true, 
+        message: `${messages.length} mensagens adicionadas à fila (legacy)`,
+        queueSize: tenantManager.messageQueue.getQueueSize(tenantId)
+      });
+
+      setImmediate(() => {
+        if (tenantManager) {
+          tenantManager.processQueueForTenant(tenantId).catch(err => {
+            console.error('❌ Erro ao processar fila (processQueueForTenant):', err);
+          });
+        }
+      });
+
+      return;
+    }
+
+    // New scheduling API: products + groups + per_group_delay_seconds + per_product_delay_minutes
+    const products = Array.isArray(body.products) ? body.products : null;
+    const groups = Array.isArray(body.groups) ? body.groups : null;
+    const perGroupDelaySeconds = Number(body.per_group_delay_seconds || 2);
+    const perProductDelayMinutes = Number(body.per_product_delay_minutes || 0);
+
+    if (!tenantId || !products || !groups || products.length === 0 || groups.length === 0) {
+      console.log(`❌ Parâmetros inválidos para scheduling`);
       console.log(`${'='.repeat(70)}\n`);
       return res.status(400).json({ 
         success: false, 
-        error: 'tenant_id e messages (array) são obrigatórios' 
+        error: 'tenant_id, products (array) e groups (array) são obrigatórios para scheduling' 
       });
     }
 
-      // Não bloquear enfileiramento caso a sessão esteja temporariamente indisponível.
-      const isOnline = !!tenantManager?.getOnlineClient(tenantId);
-      if (!isOnline) {
-        console.log(`⚠️ Sessão não online no momento; as mensagens serão enfileiradas e enviadas quando o WhatsApp reconectar`);
-      } else {
-        console.log(`✅ Sessão online - adicionando ${messages.length} mensagens à fila`);
+    const perGroupDelayMs = Math.max(0, perGroupDelaySeconds) * 1000;
+    const perProductDelayMs = Math.max(0, perProductDelayMinutes) * 60 * 1000;
+
+    let scheduledCount = 0;
+    const totalProducts = products.length;
+    const totalGroups = groups.length;
+
+    console.log(`📨 Scheduling ${totalProducts} produto(s) × ${totalGroups} grupo(s)`);
+    console.log(`⏱️ Delay entre grupos: ${perGroupDelaySeconds}s | Delay entre produtos: ${perProductDelayMinutes}min`);
+
+    // Agendar enqueues sem bloquear a resposta
+    for (let p = 0; p < products.length; p++) {
+      const product = products[p];
+
+      // tempo inicial para este produto = p * (totalGroups * perGroupDelayMs + perProductDelayMs)
+      const startTimeForProduct = p * ((totalGroups * perGroupDelayMs) + perProductDelayMs);
+
+      for (let g = 0; g < groups.length; g++) {
+        const groupId = groups[g];
+        const offset = startTimeForProduct + (g * perGroupDelayMs);
+
+        setTimeout(() => {
+          tenantManager.messageQueue.enqueue(tenantId, {
+            groupId,
+            message: product.message,
+            productName: product.productName || product.name || 'N/A'
+          });
+
+          scheduledCount++;
+          console.log(`✅ Scheduled message for tenant=${tenantId} product=${product.id} group=${groupId} (offset ${offset}ms)`);
+
+          // Start processing the queue (will be a no-op if already processing)
+          setImmediate(() => {
+            if (tenantManager) {
+              tenantManager.processQueueForTenant(tenantId).catch(err => {
+                console.error('❌ Erro ao processar fila (processQueueForTenant):', err);
+              });
+            }
+          });
+
+        }, offset);
       }
+    }
 
-    // Adicionar todas as mensagens na fila
-    messages.forEach(msg => {
-      tenantManager.messageQueue.enqueue(tenantId, {
-        groupId: msg.groupId,
-        message: msg.message,
-        productName: msg.productName || 'N/A'
-      });
-    });
+    const estimatedTotalTimeMs = ((totalProducts - 1) * ((totalGroups * perGroupDelayMs) + perProductDelayMs)) + ((totalGroups - 1) * perGroupDelayMs);
 
-    console.log(`✅ ${messages.length} mensagens adicionadas à fila`);
-    console.log(`${'='.repeat(70)}\n`);
-
-    // Responder imediatamente
     res.json({ 
       success: true, 
-      message: `${messages.length} mensagens adicionadas à fila`,
+      message: `${totalProducts * totalGroups} mensagens agendadas`,
+      scheduled: totalProducts * totalGroups,
+      estimated_total_time_ms: estimatedTotalTimeMs,
       queueSize: tenantManager.messageQueue.getQueueSize(tenantId)
-    });
-
-    // Iniciar processamento da fila (assíncrono) - TenantManager centraliza lógica de envio
-    setImmediate(() => {
-      if (tenantManager) {
-        tenantManager.processQueueForTenant(tenantId).catch(err => {
-          console.error('❌ Erro ao processar fila (processQueueForTenant):', err);
-        });
-      }
     });
   });
 
