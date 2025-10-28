@@ -1147,6 +1147,68 @@ function createApp(tenantManager, supabaseHelper) {
     }
   });
 
+  // Endpoint para obter/baixar a foto de perfil do WhatsApp e cachear no customers.whatsapp_photo_url
+  app.get('/wa-profile', async (req, res) => {
+    const { tenantId } = req;
+    const phone = req.query.phone;
+
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'Parâmetro phone é obrigatório' });
+    }
+
+    try {
+      // Normalizar para buscar no DB
+      let dbPhone = String(phone).replace(/\D/g, '');
+      if (!dbPhone.startsWith('55')) dbPhone = '55' + dbPhone;
+
+      // Tentar buscar campo cacheado no customers
+      const customers = await supabaseHelper.request(`/rest/v1/customers?phone=eq.${dbPhone}&select=id,whatsapp_photo_url`);
+      if (Array.isArray(customers) && customers.length > 0 && customers[0].whatsapp_photo_url) {
+        return res.json({ success: true, url: customers[0].whatsapp_photo_url, cached: true });
+      }
+
+      // Se não estiver cacheado, chamar edge function existente (usando service key no servidor)
+      console.log(`🔍 Buscando foto via edge function para phone=${phone}`);
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/whatsapp-connection`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`
+        },
+        body: JSON.stringify({ action: 'get_profile_picture', data: { number: phone } })
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        console.error('Erro ao chamar edge function whatsapp-connection:', response.status, text);
+        return res.status(502).json({ success: false, error: 'Erro ao buscar foto do WhatsApp' });
+      }
+
+      const data = await response.json();
+      const profilePicture = data?.profilePicture || null;
+
+      if (!profilePicture) {
+        return res.status(404).json({ success: false, error: 'Foto não disponível' });
+      }
+
+      // Tentar salvar no customers (PATCH) para cache
+      try {
+        await supabaseHelper.request(`/rest/v1/customers?phone=eq.${dbPhone}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ whatsapp_photo_url: profilePicture })
+        });
+        console.log(`✅ Foto cacheada para phone=${dbPhone}`);
+      } catch (err) {
+        console.warn('⚠️ Falha ao salvar whatsapp_photo_url no customers:', err.message || err);
+      }
+
+      return res.json({ success: true, url: profilePicture, cached: false });
+    } catch (error) {
+      console.error('Erro no /wa-profile:', error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // NOVO: Endpoint para forçar reset e gerar novo QR
   app.post('/reset/:tenantId', async (req, res) => {
     const { tenantId } = req.params;
