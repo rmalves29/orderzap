@@ -1,194 +1,104 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'; 
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { normalizeForStorage, normalizeForWhatsApp } from '../_utils/phone.ts';
 
 const corsHeaders = {
- 'Acesso-controle-permitir-origem': '*', 
- 'Access-Control-Allow-Headers': 'autorização, x-client-info, apikey, tipo de conteúdo', 
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-tipo PaidOrderRequest = { 
- tenant_id: cadeia de caracteres; 
- order_id: número; 
-};
-
-digite CartItemRow = { 
- qtd: número; 
- unit_price: número; 
- produtos: { 
- nome?: string | nulo; 
- código?: string | nulo; 
- } | nulo; 
-};
-
-function formatCurrency(valor: número) { 
- return 'R$ ${value.toFixed(2)}'; 
+interface SendPaidOrderRequest {
+  tenant_id: string;
+  order_id: number;
+  customer_phone: string;
+  total?: number;
 }
 
-função buildOrderDetails(items: CartItemRow[] | nulo | indefinido) { 
- if (!items || items.comprimento === 0) { 
-    return 'Itens confirmados.';
-  }
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
- Itens de devolução 
-    .map((item) => {
- Nome = item.Produtos?.No nome?? 'Pregador'; 
- const qtd = item.Qtd ?? 1; 
- const total = (item.unit_price ?? 0) * quantidade; 
- return '• ${qty}x ${name} - ${formatCurrency(total)}'; 
-    })
-    .join('\n');
-}
+  try {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const whatsappApiUrl = Deno.env.get('WHATSAPP_MULTITENANT_URL') || 'https://backend-production-2599.up.railway.app';
+    const supabase = createClient(supabaseUrl, supabaseKey);
 
-function normalizePhoneBrazil(phone: string): string { 
- let clean = telefone.substituir(/\D/g, ''); 
+    const body: SendPaidOrderRequest = await req.json();
+    const { tenant_id, order_id, customer_phone, total } = body;
 
- se (limpo.startsWith('55')) { 
- limpo = limpo.substring(2); 
-  }
+    console.log('🔔 EDGE: whatsapp-send-paid-order payload:', JSON.stringify(body));
 
- se (limpo.comprimento < 10) { 
- return '55${clean}'; 
-  }
-
- const ddd = parseInt(clean.substring(0, 2)); 
- let number = clean.substring(2); 
-
- if(ddd>30) { 
- se (número.comprimento === 9 && número.startsWith('9')) { 
- número = número.substring(1); 
-    }
-  } mais {
- se (número.comprimento === 8) { 
- número = '9${número}'; 
-    }
-  }
-
- return '55${ddd}${número}'; 
-}
-
-Deno.serve(async(req) => { 
- if (req.method === 'OPÇÕES') { 
- return new Response(null, { headers: corsHeaders }); 
-  }
-
-  tentar {
-   const body: PaidOrderRequest = await req.json(); 
- const { tenant_id, order_id } = corpo; 
-
- if (!tenant_id || !order_id) { 
- return new Response( 
-        JSON.stringify({ error: 'tenant_id e order_id são obrigatórios' }),
- { status: 400, cabeçalhos: { ... corsHeaders, 'Tipo de conteúdo': 'aplicativo/json' } } 
-      );
-    }
-
- const supabaseUrl = Deno.env.get('SUPABASE_URL'); 
- const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'); 
-
- if (!supabaseUrl || !supabaseKey) { 
-      throw new Error('Variáveis SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY ausentes');
-    }
-
- const whatsappApiUrl = Deno.env.get('WHATSAPP_MULTITENANT_URL') || 'https://backend-production-2599.up.railway.app'; 
-
- const supabase = createClient(supabaseUrl, supabaseKey); 
-
- const { data: order, error: orderError } = await supabase 
- .from('pedidos') 
-      .select('id, tenant_id, customer_phone, customer_name, total_amount, cart_id, event_type, event_date')
- Não é uma questãoEQ('id', order_id) 
-      .eq('tenant_id', tenant_id)
- .talvezSingle(); 
-
- if (orderError || !order) { 
- return new Response( 
-        JSON.stringify({ error: 'Pedido não encontrado' }),
- { status: 404, cabeçalhos: { ... corsHeaders, 'Tipo de conteúdo': 'aplicativo/json' } } 
-      );
-    }
-
- if (!order.customer_phone) { 
- return new Response( 
-        JSON.stringify({ error: 'Pedido sem telefone cadastrado' }),
- { status: 400, cabeçalhos: { ... corsHeaders, 'Tipo de conteúdo': 'aplicativo/json' } } 
-      );
-    }
-
- let orderItems: CartItemRow[] = []; 
- se (ordem.cart_id) { 
- const { data: items } = aguardar supabase 
-        .from('cart_items')
- .select('qtd, unit_price, produtos(nome, código)') 
- Não é uma questãoeq('cart_id', ordem.cart_id); 
-
- orderItems = itens || []; 
-    }
-
- const { data: template } = aguardar supabase 
+    // Buscar template PAID_ORDER do tenant
+    const { data: template, error: templateError } = await supabase
       .from('whatsapp_templates')
- .select('conteúdo') 
+      .select('content')
       .eq('tenant_id', tenant_id)
- Não é uma questãoEQ('tipo', 'PAID_ORDER') 
- .talvezSingle(); 
+      .eq('type', 'PAID_ORDER')
+      .maybeSingle();
 
-    const defaultMessage = '🎉 *Pagamento Confirmado - Pedido #{{order_id}}*\n\nRecebemos o seu pagamento!\nValor: *{{total_amount}}*\n\nObrigado por comprar com a gente!';
+    if (templateError) {
+      console.error('Erro ao buscar template PAID_ORDER:', templateError);
+    }
 
- const orderDetails = buildOrderDetails(orderItems); 
- const totalFormatted = formatCurrency(Number(order.total_amount || 0)); 
- const eventDateFormatted = order.event_date ? new Date(order.event_date).toLocaleDateString('pt-BR') : ''; 
+    let message = template?.content || `🎉 Pagamento confirmado - Pedido #{{order_id}}\n\nRecebemos seu pagamento. Valor: R$ {{total}}\nObrigado!`;
+    message = message.replace(/{{order_id}}/g, String(order_id)).replace(/{{total}}/g, (typeof total !== 'undefined' ? Number(total).toFixed(2) : '0.00'));
 
-    const message = (template?.content || defaultMessage)
-      .replace(/{{order_id}}/g, order.id.toString())
-      .replace(/{{total}}/g, totalFormatted)
-      .replace(/{{total_amount}}/g, totalFormatted)
-      .replace(/{{customer_name}}/g, order.customer_name || '')
-      .replace(/{{customer_phone}}/g, order.customer_phone || '')
-      .replace(/{{order_details}}/g, orderDetails)
-      .replace(/{{event_type}}/g, order.event_type || '')
-      .replace(/{{event_date}}/g, eventDateFormatted);
+    // Normalizar telefones
+    const phoneForStorage = normalizeForStorage(customer_phone);
+    const phoneForWhatsApp = normalizeForWhatsApp(customer_phone);
 
-    const phoneFinal = normalizePhoneBrazil(order.customer_phone);
+    console.log('📞 phoneForStorage:', phoneForStorage);
+    console.log('📞 phoneForWhatsApp:', phoneForWhatsApp);
 
-    const whatsappResponse = await fetch(`${whatsappApiUrl}/send`, {
+    // Enviar via servidor Node.js
+    const whatsappPayload = {
+      phone: phoneForWhatsApp,
+      message
+    };
+
+    console.log('🌐 Chamando WhatsApp API:', whatsappApiUrl + '/send');
+
+    const response = await fetch(`${whatsappApiUrl}/send`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-tenant-id': tenant_id
       },
-      body: JSON.stringify({
-        phone: phoneFinal,
-        message
-      })
+      body: JSON.stringify(whatsappPayload)
     });
 
-    if (!whatsappResponse.ok) {
-      const errorText = await whatsappResponse.text();
-      throw new Error(`WhatsApp API error (${whatsappResponse.status}): ${errorText}`);
+    if (!response.ok) {
+      const text = await response.text();
+      console.error('Erro na API de WhatsApp:', response.status, text);
+      return new Response(JSON.stringify({ success: false, error: text }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
-    await supabase.from('whatsapp_messages').insert({
+    const resJson = await response.json();
+
+    // Registrar no banco
+    const { error: insertError } = await supabase.from('whatsapp_messages').insert({
       tenant_id,
- telefone: phoneFinal, 
- Mensagem 
- Tipo: 'order_paid', 
- order_id: ordem.identificação, 
- sent_at: new Date().toISOString(), 
- processado: verdadeiro 
+      phone: phoneForStorage,
+      message,
+      type: 'paid_order',
+      sent_at: new Date().toISOString(),
+      processed: true,
+      order_id
     });
 
- aguarde a base 
- .from('pedidos') 
-      .update({ payment_confirmation_sent: true })
- .eq('id', ordem.identificação); 
+    if (insertError) console.error('Erro ao salvar whatsapp_messages:', insertError);
 
- return new Response( 
- JSON.stringify({ success: true }), 
- { status: 200, cabeçalhos: { ... corsHeaders, 'Tipo de conteúdo': 'aplicativo/json' } } 
-    );
- } catch (erro) { 
- console.error('Erro whatsapp-send-paid-order:', erro); 
- return new Response( 
- JSON.stringify({ error: (erro como Erro).mensagem }), 
- { status: 500, cabeçalhos: { ... corsHeaders, 'Tipo de conteúdo': 'aplicativo/json' } } 
-    );
+    // Marcar pedido como payment_confirmation_sent = true
+    const { error: updateError } = await supabase
+      .from('orders')
+      .update({ payment_confirmation_sent: true })
+      .eq('id', order_id);
+
+    if (updateError) console.error('Erro ao atualizar payment_confirmation_sent:', updateError);
+
+    return new Response(JSON.stringify({ success: true, whatsappResult: resJson }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+  } catch (error) {
+    console.error('Erro em whatsapp-send-paid-order:', error);
+    return new Response(JSON.stringify({ error: String(error) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
 });
