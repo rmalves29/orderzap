@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { supabaseTenant } from '@/lib/supabase-tenant';
+import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/useAuth';
 import { ShoppingCart, Eye, CreditCard, Calendar, Phone, Package } from 'lucide-react';
@@ -119,22 +120,61 @@ export default function TenantOrders() {
   };
 
   const markAsPaid = async (orderId: number) => {
+    // Perguntar confirmação ao operador e opcionalmente enviar a confirmação por WhatsApp
+    const confirmed = confirm('Deseja marcar este pedido como pago e enviar a confirmação por WhatsApp?');
+    if (!confirmed) return;
+
     try {
+      // Buscar dados do pedido para enviar a mensagem (telefone / total / tenant)
+      const { data: orderData, error: fetchError } = await supabaseTenant
+        .from('orders')
+        .select('id, customer_phone, total_amount, tenant_id')
+        .eq('id', orderId)
+        .maybeSingle();
+
+      if (fetchError || !orderData) {
+        throw fetchError || new Error('Pedido não encontrado');
+      }
+
+      let messageSent = false;
+
+      try {
+        const payload = {
+          tenant_id: orderData.tenant_id,
+          order_id: orderData.id,
+          customer_phone: orderData.customer_phone,
+          total: Number(orderData.total_amount || 0)
+        };
+
+        const res = await supabase.functions.invoke('whatsapp-send-paid-order', { body: payload });
+        if (!res.error) {
+          messageSent = true;
+        } else {
+          console.error('Erro na edge function whatsapp-send-paid-order:', res.error);
+        }
+      } catch (err) {
+        console.error('Erro ao chamar edge function whatsapp-send-paid-order:', err);
+      }
+
+      // Atualizar o status do pedido no banco
+      const updateData: any = { is_paid: true };
+      if (messageSent) updateData.payment_confirmation_sent = true;
+
       const { error } = await supabaseTenant
         .from('orders')
-        .update({ is_paid: true })
+        .update(updateData)
         .eq('id', orderId);
 
       if (error) throw error;
 
       toast({
         title: 'Sucesso',
-        description: 'Pedido marcado como pago!'
+        description: 'Pedido marcado como pago'
       });
 
       loadOrders();
       if (selectedOrder && selectedOrder.id === orderId) {
-        setSelectedOrder({ ...selectedOrder, is_paid: true });
+        setSelectedOrder({ ...selectedOrder, is_paid: true, payment_confirmation_sent: !!updateData.payment_confirmation_sent });
       }
     } catch (error: any) {
       toast({
