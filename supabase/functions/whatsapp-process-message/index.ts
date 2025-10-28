@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { normalizeForStorage, normalizeForWhatsApp } from '../_utils/phone.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -69,74 +70,14 @@ Deno.serve(async (req) => {
 
     console.log('✅ Códigos detectados:', codes);
 
-    // Função para normalizar telefone SOMENTE para envio no WhatsApp
-    function normalizePhoneForWhatsApp(phone: string): string {
-      // Remover tudo que não é número
-      let clean = phone.replace(/\D/g, '');
-      
-      console.log(`🔍 Telefone original (limpo): ${clean} (${clean.length} dígitos)`);
-      
-      // Remover código do país (55) se tiver
-      if (clean.startsWith('55')) {
-        clean = clean.substring(2);
-        console.log(`✂️ Removido DDI 55: ${clean}`);
-      }
-      
-      // Validar tamanho
-      if (clean.length < 10 || clean.length > 11) {
-        console.warn(`⚠️ Telefone com tamanho inválido: ${clean.length} dígitos`);
-        return '55' + clean;
-      }
-      
-      const ddd = parseInt(clean.substring(0, 2));
-      
-      // Validar DDD
-      if (ddd < 11 || ddd > 99) {
-        console.warn('⚠️ DDD inválido:', ddd);
-        return '55' + clean;
-      }
-      
-      // Garantir 9º dígito para celulares
-      if (clean.length === 10 && clean[2] === '9') {
-        clean = clean.substring(0, 2) + '9' + clean.substring(2);
-        console.log('✅ 9º dígito adicionado para celular:', clean);
-      } else if (clean.length === 10 && clean[2] !== '9') {
-        clean = clean.substring(0, 2) + '9' + clean.substring(2);
-        console.log('✅ 9º dígito adicionado:', clean);
-      }
-      
-      // Adicionar DDI 55
-      return '55' + clean;
-    }
-
-    // Função para normalizar telefone para armazenamento (sempre com 11 dígitos)
-    const normalizeForStorage = (phone: string): string => {
-      let clean = phone.replace(/\D/g, '');
-      
-      // Remove DDI 55 se presente
-      if (clean.startsWith('55')) {
-        clean = clean.substring(2);
-      }
-      
-      // Se tem 10 dígitos, adiciona o 9º dígito
-      if (clean.length === 10) {
-        const ddd = clean.substring(0, 2);
-        const number = clean.substring(2);
-        clean = ddd + '9' + number;
-        console.log('✅ 9º dígito ADICIONADO para armazenamento (WhatsApp):', phone, '→', clean);
-      }
-      
-      return clean;
-    };
-
     const messageText = message.trim();
-    const senderPhone = normalizePhoneForWhatsApp(customer_phone);
+    const senderPhone = normalizeForWhatsApp(customer_phone);
     const phoneForStorage = normalizeForStorage(customer_phone);
     
     console.log('\n📞 ===== TELEFONES =====');
     console.log('📥 Original:', customer_phone);
-    console.log('💾 Para armazenar (sem normalizar):', phoneForStorage);
-    console.log('📤 Para enviar WhatsApp (normalizado):', phoneForWhatsApp);
+  console.log('💾 Para armazenar (11 dígitos):', phoneForStorage);
+  console.log('📤 Para enviar WhatsApp (normalizado):', senderPhone);
     console.log('===== FIM =====\n');
 
     // Salvar/atualizar registro do grupo se for mensagem de grupo
@@ -401,7 +342,7 @@ Deno.serve(async (req) => {
         const sendMessageResponse = await supabase.functions.invoke('whatsapp-send-item-added', {
           body: {
             tenant_id,
-            customer_phone: phoneForWhatsApp, // Normalizar SOMENTE para envio
+            customer_phone: senderPhone, // Normalizar SOMENTE para envio
             product_name: product.name,
             product_code: product.code,
             quantity: qty,
