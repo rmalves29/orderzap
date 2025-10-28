@@ -36,7 +36,9 @@ const Sorteio = () => {
   const getWhatsAppProfilePicture = async (phone: string): Promise<string> => {
     try {
       // Chama o endpoint do backend (/wa-profile) que faz cache e proxy seguro
-      const resp = await fetch(`/wa-profile?phone=${encodeURIComponent(phone)}`);
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (tenantId) headers['x-tenant-id'] = String(tenantId);
+      const resp = await fetch(`/wa-profile?phone=${encodeURIComponent(phone)}`, { headers });
       if (resp.ok) {
         const j = await resp.json();
         if (j?.url) return j.url;
