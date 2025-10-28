@@ -87,8 +87,40 @@ const MpReturn = () => {
           console.log(`Pedido #${order.id} marcado como pago via return page`);
           toast({
             title: "Pagamento confirmado",
-            description: `Pedido #${order.id} marcado como pago.`,
+            description: `Pedido #${order.id} marcado como pago. Enviando confirmação por WhatsApp...`,
           });
+
+          // Enviar template PAID_ORDER via edge function (envio automático)
+          try {
+            const payload = {
+              tenant_id: order.tenant_id,
+              order_id: order.id,
+              customer_phone: order.customer_phone,
+              total: Number(order.total_amount || 0)
+            };
+
+            const res = await supabase.functions.invoke('whatsapp-send-paid-order', { body: payload });
+            if (res.error) {
+              console.error('Erro na edge function whatsapp-send-paid-order (automatic):', res.error);
+              toast({
+                title: 'Aviso',
+                description: 'Pedido marcado como pago, mas não foi possível enviar confirmação por WhatsApp.',
+                variant: 'destructive'
+              });
+            } else {
+              toast({
+                title: 'Confirmação enviada',
+                description: `Confirmação de pagamento enviada por WhatsApp para o pedido #${order.id}`,
+              });
+            }
+          } catch (err) {
+            console.error('Erro ao chamar whatsapp-send-paid-order:', err);
+            toast({
+              title: 'Aviso',
+              description: 'Pedido marcado como pago, mas ocorreu um erro ao enviar confirmação por WhatsApp.',
+              variant: 'destructive'
+            });
+          }
         }
       } else {
         console.log(`Nenhum pedido encontrado para preference_id: ${preferenceId}`);
