@@ -960,8 +960,11 @@ function normalizePhone(phone) {
 }
 
 /**
- * Garante que o telefone salvo no banco contenha sempre o 9º dígito
- * e comece com o DDI 55. Retorna apenas dígitos (ex: 55119xxxxxxx).
+ * Garante o formato do telefone salvo no banco aplicando a regra do 9º dígito.
+ * Retorna telefone com DDI 55 seguido da parte nacional (somente dígitos).
+ * Regra aplicada:
+ *  - Se DDD < 31: incluir o 9º dígito caso não exista (10 -> 11)
+ *  - Se DDD >= 31: remover o 9º dígito caso exista (11 -> 10)
  */
 function ensureDbPhoneDigits(phone) {
   if (!phone) return phone;
@@ -975,12 +978,26 @@ function ensureDbPhoneDigits(phone) {
   // pegar parte nacional (após DDI)
   let national = clean.substring(2);
 
-  // se tiver 10 dígitos (sem 9), adicionar 9 após DDD
+  // Se nacional tem 10 dígitos -> avaliar inclusão do 9
   if (national.length === 10) {
-    national = national.substring(0, 2) + '9' + national.substring(2);
+    const ddd = parseInt(national.substring(0, 2), 10);
+    if (!isNaN(ddd) && ddd < 31) {
+      // incluir 9 após DDD
+      national = national.substring(0, 2) + '9' + national.substring(2);
+    }
+    // se DDD >= 31 e tem 10 dígitos, mantemos sem o 9
   }
 
-  // se já tiver 11, assume que já contém o 9º dígito
+  // Se nacional tem 11 dígitos -> avaliar remoção do 9
+  if (national.length === 11) {
+    const ddd = parseInt(national.substring(0, 2), 10);
+    if (!isNaN(ddd) && ddd >= 31 && national[2] === '9') {
+      // remover o 9º dígito
+      national = national.substring(0, 2) + national.substring(3);
+    }
+    // caso contrário, mantemos os 11 dígitos
+  }
+
   return '55' + national;
 }
 
