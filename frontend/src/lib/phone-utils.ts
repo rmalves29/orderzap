@@ -16,8 +16,8 @@ function stripBrazilCountryCode(clean: string): string {
   return clean.startsWith('55') ? clean.slice(2) : clean;
 }
 
-function ensureBrazilianMobileNine(clean: string): string {
-  if (clean.length !== 10) {
+function applyRegionalNinthDigitRule(clean: string): string {
+  if (clean.length < 10) {
     return clean;
   }
 
@@ -26,7 +26,20 @@ function ensureBrazilianMobileNine(clean: string): string {
     return clean;
   }
 
-  return `${clean.slice(0, 2)}9${clean.slice(2)}`;
+  const prefix = clean.slice(0, 2);
+  let number = clean.slice(2);
+
+  if (ddd >= 31) {
+    if (number.length === 9 && number.startsWith('9')) {
+      number = number.slice(1);
+    }
+  } else {
+    if (number.length === 8) {
+      number = `9${number}`;
+    }
+  }
+
+  return `${prefix}${number}`;
 }
 
 /**
@@ -37,7 +50,7 @@ export function normalizeForStorage(phone: string): string {
   if (!phone) return phone;
 
   const cleaned = stripBrazilCountryCode(removeNonDigits(phone));
-  return ensureBrazilianMobileNine(cleaned);
+  return applyRegionalNinthDigitRule(cleaned);
 }
 
 /**
@@ -49,10 +62,12 @@ export function normalizeForSending(phone: string): string {
 
   let clean = stripBrazilCountryCode(removeNonDigits(phone));
 
-  if (clean.length < 10 || clean.length > 11) {
+  if (clean.length < 10) {
     console.warn('[phone-utils] Invalid phone length for sending', { phone, clean });
     return `55${clean}`;
   }
+
+  clean = applyRegionalNinthDigitRule(clean);
 
   const ddd = Number(clean.slice(0, 2));
   if (Number.isNaN(ddd) || ddd < MIN_BRAZILIAN_DDD || ddd > MAX_BRAZILIAN_DDD) {
@@ -60,7 +75,6 @@ export function normalizeForSending(phone: string): string {
     return `55${clean}`;
   }
 
-  clean = ensureBrazilianMobileNine(clean);
   return `55${clean}`;
 }
 
@@ -72,7 +86,7 @@ export function formatPhoneForDisplay(phone: string): string {
   if (!phone) return phone;
 
   const cleanPhone = removeNonDigits(phone);
-  const phoneWithoutDDI = stripBrazilCountryCode(cleanPhone);
+  const phoneWithoutDDI = applyRegionalNinthDigitRule(stripBrazilCountryCode(cleanPhone));
 
   if (phoneWithoutDDI.length >= 10) {
     const ddd = phoneWithoutDDI.slice(0, 2);
