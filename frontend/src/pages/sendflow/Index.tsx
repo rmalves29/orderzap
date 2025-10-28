@@ -375,17 +375,31 @@ export default function SendFlow() {
 
       console.log(`📦 Programando envio de ${selectedProductArray.length * selectedGroupArray.length} mensagens para o backend...`);
 
+      const productsPayload = selectedProductArray.map(product => ({
+        id: product.id,
+        code: product.code,
+        name: product.name,
+        message: personalizeMessage(product),
+        productName: product.name
+      }));
+
+      // Build legacy `messages` array (some WhatsApp servers expect this format)
+      const legacyMessages: Array<{ groupId: string; message: string; productName?: string }> = [];
+      for (const prod of productsPayload) {
+        for (const gid of selectedGroupArray) {
+          legacyMessages.push({ groupId: String(gid), message: String(prod.message), productName: prod.productName ? String(prod.productName) : undefined });
+        }
+      }
+
       const payload = {
-        products: selectedProductArray.map(product => ({
-          id: product.id,
-          code: product.code,
-          name: product.name,
-          message: personalizeMessage(product),
-          productName: product.name
-        })),
+        // New scheduling API (kept for servers that support it)
+        products: productsPayload,
         groups: selectedGroupArray,
         per_group_delay_seconds: perGroupDelaySeconds,
-        per_product_delay_minutes: perProductDelayMinutes
+        per_product_delay_minutes: perProductDelayMinutes,
+        // Legacy compatibility: include tenant_id and messages array for servers that require it
+        tenant_id: tenant?.id,
+        messages: legacyMessages
       };
 
       // 4. Enviar scheduling para o backend (o backend enfileira com delays)
