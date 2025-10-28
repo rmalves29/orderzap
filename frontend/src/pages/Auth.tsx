@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate, useLocation, Link } from "react-router-dom";
-
 export default function Auth() {
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -31,40 +30,7 @@ export default function Auth() {
       navigate(from, { replace: true });
     } catch (err: any) {
       const msg = (err?.message || '').toLowerCase();
-      const isInvalidCreds = msg.includes('invalid login credentials') || msg.includes('invalid login');
-      const isMasterEmail = email.trim().toLowerCase() === 'rmalves21@hotmail.com';
-
-      if (isInvalidCreds && isMasterEmail) {
-        toast({ title: 'Corrigindo acesso...', description: 'Detectamos erro de credenciais. Vamos ajustar seu usuário master automaticamente.' });
-        await handleForceReset();
-        return;
-      }
-
-      toast({ title: 'Erro ao entrar', description: err.message || 'Verifique suas credenciais.', variant: 'destructive' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSignup = async () => {
-    setLoading(true);
-    try {
-      const redirectUrl = `${window.location.origin}/`;
-      const { error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: { emailRedirectTo: redirectUrl },
-      });
-      if (error) throw error;
-      toast({ title: "Cadastro realizado!", description: "Você já pode fazer login com suas credenciais." });
-      setMode("login");
-    } catch (err: any) {
-      toast({ title: "Erro no cadastro", description: err.message || "Tente novamente mais tarde.", variant: "destructive" });
-    } finally {
-      setLoading(false);
-    }
-  };
-
+@@ -69,57 +68,50 @@ export default function Auth() {
   // Ajuda de emergência: redefine a senha no servidor (apenas para o e-mail master permitido)
   const handleForceReset = async () => {
     try {
@@ -90,7 +56,7 @@ export default function Auth() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background">
       <main className="w-full max-w-md p-4">
-        <Card>
+         <Card>
           <CardHeader>
             <CardTitle className="text-center">
               {mode === "login" ? "Entrar" : "Criar conta"}
@@ -115,39 +81,3 @@ export default function Auth() {
                   <button
                     type="button"
                     onClick={handleForceReset}
-                    className="text-xs underline text-muted-foreground mt-2"
-                    disabled={loading || !email}
-                  >
-                    Problemas para entrar? Corrigir automaticamente
-                  </button>
-                </div>
-              </>
-            ) : (
-              <Button className="w-full" onClick={handleSignup} disabled={loading}>
-                {loading ? "Criando..." : "Criar conta"}
-              </Button>
-            )}
-
-            <div className="text-center text-sm text-muted-foreground">
-              {mode === "login" ? (
-                <>
-                  Não tem conta? {" "}
-                  <button className="underline" onClick={() => setMode("signup")}>Cadastre-se</button>
-                </>
-              ) : (
-                <>
-                  Já tem conta? {" "}
-                  <button className="underline" onClick={() => setMode("login")}>Entrar</button>
-                </>
-              )}
-            </div>
-
-            <div className="text-center">
-              <Link to="/" className="text-sm underline">Voltar ao início</Link>
-            </div>
-          </CardContent>
-        </Card>
-      </main>
-    </div>
-  );
-}
