@@ -1157,52 +1157,97 @@ function createApp(tenantManager, supabaseHelper) {
     }
 
     try {
-      // Normalizar para buscar no DB
-      let dbPhone = String(phone).replace(/\D/g, '');
-      if (!dbPhone.startsWith('55')) dbPhone = '55' + dbPhone;
+      // Vamos tentar múltiplas estratégias para encontrar a foto:
+      // 1) Procurar no customers usando formatos comuns (com/sem DDI 55)
+      // 2) Se tenant WhatsApp estiver autenticado, tentar pegar via Baileys (socket)
+      // 3) Se tudo falhar, retornar 404 para o frontend usar fallback
 
-      // Tentar buscar campo cacheado no customers
-      const customers = await supabaseHelper.request(`/rest/v1/customers?phone=eq.${dbPhone}&select=id,whatsapp_photo_url`);
-      if (Array.isArray(customers) && customers.length > 0 && customers[0].whatsapp_photo_url) {
-        return res.json({ success: true, url: customers[0].whatsapp_photo_url, cached: true });
+      const clean = String(phone).replace(/\D/g, '');
+      const candidates = [];
+      // Possíveis formatos para busca no DB
+      if (clean.startsWith('55')) {
+        candidates.push(clean);
+        candidates.push(clean.substring(2));
+      } else {
+        candidates.push('55' + clean);
+        candidates.push(clean);
       }
 
-      // Se não estiver cacheado, chamar edge function existente (usando service key no servidor)
-      console.log(`🔍 Buscando foto via edge function para phone=${phone}`);
-      const response = await fetch(`${SUPABASE_URL}/functions/v1/whatsapp-connection`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`
-        },
-        body: JSON.stringify({ action: 'get_profile_picture', data: { number: phone } })
-      });
+      // Normalize unique
+      const uniqueCandidates = Array.from(new Set(candidates));
 
-      if (!response.ok) {
-        const text = await response.text();
-        console.error('Erro ao chamar edge function whatsapp-connection:', response.status, text);
-        return res.status(502).json({ success: false, error: 'Erro ao buscar foto do WhatsApp' });
+      let foundUrl = null;
+      let foundPhoneForCache = null;
+
+      for (const candidate of uniqueCandidates) {
+        try {
+          const path = `/rest/v1/customers?phone=eq.${candidate}&select=id,whatsapp_photo_url`;
+          const customers = await supabaseHelper.request(path);
+          if (Array.isArray(customers) && customers.length > 0 && customers[0].whatsapp_photo_url) {
+            foundUrl = customers[0].whatsapp_photo_url;
+            foundPhoneForCache = candidate;
+            console.log(`� Encontrado whatsapp_photo_url cacheado para phone=${candidate}`);
+            break;
+          }
+        } catch (err) {
+          console.warn('⚠️ Erro ao consultar customers para', candidate, err.message || err);
+        }
       }
 
-      const data = await response.json();
-      const profilePicture = data?.profilePicture || null;
-
-      if (!profilePicture) {
-        return res.status(404).json({ success: false, error: 'Foto não disponível' });
+      if (foundUrl) {
+        return res.json({ success: true, url: foundUrl, cached: true, phone: foundPhoneForCache });
       }
 
-      // Tentar salvar no customers (PATCH) para cache
-      try {
-        await supabaseHelper.request(`/rest/v1/customers?phone=eq.${dbPhone}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ whatsapp_photo_url: profilePicture })
-        });
-        console.log(`✅ Foto cacheada para phone=${dbPhone}`);
-      } catch (err) {
-        console.warn('⚠️ Falha ao salvar whatsapp_photo_url no customers:', err.message || err);
+      // Tentar buscar via Baileys se o tenant estiver configurado e autenticado
+      if (tenantId) {
+        try {
+          const sock = tenantManager.getAuthenticatedClient(tenantId);
+          if (sock) {
+            // Normalizar para JID de envio
+            const jid = normalizePhone(String(phone));
+            console.log(`🔍 Tentando buscar foto via Baileys para JID=${jid}`);
+
+            // Verificar métodos possíveis no socket (compatibilidade com diferentes versões)
+            let urlFromBaileys = null;
+            try {
+              if (typeof sock.profilePictureUrl === 'function') {
+                urlFromBaileys = await sock.profilePictureUrl(jid).catch(() => null);
+              } else if (typeof sock.fetchProfilePicture === 'function') {
+                urlFromBaileys = await sock.fetchProfilePicture(jid).catch(() => null);
+              } else if (typeof sock.getProfilePicture === 'function') {
+                urlFromBaileys = await sock.getProfilePicture(jid).catch(() => null);
+              }
+            } catch (err) {
+              console.warn('⚠️ Erro ao chamar método de profile picture do Baileys:', err.message || err);
+            }
+
+            if (urlFromBaileys) {
+              // Tentar salvar no customers para cache (usar formato DB preferido)
+              const dbPhoneForCache = ensureDbPhoneDigits(String(phone));
+              try {
+                await supabaseHelper.request(`/rest/v1/customers?phone=eq.${dbPhoneForCache}`, {
+                  method: 'PATCH',
+                  body: JSON.stringify({ whatsapp_photo_url: urlFromBaileys })
+                });
+                console.log(`✅ Foto obtida via Baileys e cacheada para phone=${dbPhoneForCache}`);
+              } catch (err) {
+                console.warn('⚠️ Falha ao salvar whatsapp_photo_url no customers:', err.message || err);
+              }
+
+              return res.json({ success: true, url: urlFromBaileys, cached: false, source: 'baileys' });
+            }
+          } else {
+            console.log('ℹ️ Tenant não autenticado/no socket disponível para buscar foto via Baileys');
+          }
+        } catch (err) {
+          console.warn('⚠️ Erro ao tentar buscar foto via Baileys:', err.message || err);
+        }
+      } else {
+        console.log('ℹ️ tenantId não fornecido na requisição, pulando busca via Baileys');
       }
 
-      return res.json({ success: true, url: profilePicture, cached: false });
+      // Se chegou aqui, não encontramos foto
+      return res.status(404).json({ success: false, error: 'Foto não disponível' });
     } catch (error) {
       console.error('Erro no /wa-profile:', error);
       return res.status(500).json({ success: false, error: error.message });
