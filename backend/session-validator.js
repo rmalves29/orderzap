@@ -92,18 +92,43 @@ export class SessionValidator {
    * Valida de forma rápida (sem logs extensos)
    */
   static quickValidate(sock) {
-    if (!sock || !sock.ws || sock.ws.readyState !== 1) {
+    // Diagnóstico rápido com logs para facilitar troubleshooting
+    try {
+      if (!sock) {
+        console.log('⚠️ [SessionValidator.quickValidate] sock ausente');
+        return false;
+      }
+
+      const wsReady = sock.ws && sock.ws.readyState === 1;
+      if (!wsReady) {
+        console.log(`⚠️ [SessionValidator.quickValidate] WebSocket não aberto (readyState=${sock.ws?.readyState})`);
+        return false;
+      }
+
+      if (!sock.authState || !sock.authState.creds || !sock.authState.creds.me) {
+        console.log('⚠️ [SessionValidator.quickValidate] authState.creds ausente');
+        return false;
+      }
+
+      const keys = sock.authState.keys;
+      // Algumas versões/implementações do storage não expõem keys.get como função
+      // — aceitar também quando há um objeto/Map com entradas já presentes.
+      const hasGet = keys && typeof keys.get === 'function';
+      const hasAnyKeys = keys && (
+        (typeof keys.size === 'number' && keys.size > 0) ||
+        (typeof keys === 'object' && Object.keys(keys).length > 0)
+      );
+
+      if (!hasGet && !hasAnyKeys) {
+        console.log('⚠️ [SessionValidator.quickValidate] keys inválidas (nenhum getter e sem entradas)');
+        return false;
+      }
+
+      // Tudo ok
+      return true;
+    } catch (err) {
+      console.log('⚠️ [SessionValidator.quickValidate] erro ao validar sessão rápida:', err && err.message);
       return false;
     }
-
-    if (!sock.authState || !sock.authState.creds || !sock.authState.creds.me) {
-      return false;
-    }
-
-    if (!sock.authState.keys || typeof sock.authState.keys.get !== 'function') {
-      return false;
-    }
-
-    return true;
   }
 }
