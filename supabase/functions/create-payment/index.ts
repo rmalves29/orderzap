@@ -1,6 +1,7 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.55.0';
+import { normalizeForStorage } from '../_utils/phone.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -51,9 +52,10 @@ serve(async (req) => {
 
     // Save or update customer with address data
     try {
+      const normalizedPhone = normalizeForStorage(customerData.phone);
       const customerUpdateData: any = {
         name: customerData.name,
-        phone: customerData.phone,
+        phone: normalizedPhone,
         tenant_id: tenant_id,
         updated_at: new Date().toISOString()
       };
@@ -270,7 +272,7 @@ serve(async (req) => {
         .from('orders')
         .insert({
           tenant_id: tenant_id,
-          customer_phone: customerData.phone,
+          customer_phone: normalizeForStorage(customerData.phone),
           customer_name: customerData.name,
           customer_cep: addressData?.cep,
           customer_street: addressData?.street,
@@ -296,14 +298,16 @@ serve(async (req) => {
       orderId = newOrder!.id;
     }
 
-    const preference = {
+      const normalizedPhoneForPref = normalizeForStorage(customerData.phone);
+
+      const preference = {
       items: items,
       payer: {
         name: customerData.name,
-        email: `${customerData.phone}@checkout.com`,
+        email: `${normalizedPhoneForPref}@checkout.com`,
         phone: {
-          area_code: customerData.phone?.substring(2, 4) || '',
-          number: customerData.phone?.substring(4) || ''
+          area_code: normalizedPhoneForPref?.substring(0, 2) || '',
+          number: normalizedPhoneForPref?.substring(2) || ''
         },
         address: {
           zip_code: addressData.cep?.replace(/\D/g, '') || '',
