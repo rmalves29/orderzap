@@ -297,8 +297,39 @@ const Pedidos = () => {
   };
 
   const sendPaidOrderMessage = async (orderId: number) => {
-    // WhatsApp functionality removed
-    return false;
+    try {
+      // Buscar order para pegar telefone e total
+      const { data: orderData, error: orderError } = await supabaseTenant
+        .from('orders')
+        .select('id, customer_phone, total_amount, tenant_id')
+        .eq('id', orderId)
+        .maybeSingle();
+
+      if (orderError || !orderData) {
+        console.error('Erro ao buscar pedido para envio:', orderError);
+        return false;
+      }
+
+      const payload = {
+        tenant_id: orderData.tenant_id,
+        order_id: orderData.id,
+        customer_phone: orderData.customer_phone,
+        total: Number(orderData.total_amount || 0)
+      };
+
+      // Invocar edge function que envia o template PAID_ORDER
+      const res = await supabase.functions.invoke('whatsapp-send-paid-order', { body: payload });
+      if (res.error) {
+        console.error('Erro na edge function whatsapp-send-paid-order:', res.error);
+        return false;
+      }
+
+      // Sucesso
+      return true;
+    } catch (error) {
+      console.error('Erro ao enviar mensagem de pagamento:', error);
+      return false;
+    }
   };
 
   const saveObservation = async (orderId: number) => {
@@ -822,6 +853,19 @@ const Pedidos = () => {
            formatPhoneForDisplay(order.customer_phone).includes(searchTerm);
   });
 
+  // Estatísticas baseadas nos pedidos filtrados (para mostrar resumo do dia ou conforme filtros aplicados)
+  const totalOrdersCount = filteredOrders.length;
+  const paidOrdersCount = filteredOrders.filter(o => o.is_paid).length;
+  const unpaidOrdersCount = totalOrdersCount - paidOrdersCount;
+  const totalSalesValue = filteredOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+  const totalPaidValue = filteredOrders.filter(o => o.is_paid).reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+  const percentPaid = totalOrdersCount > 0 ? (paidOrdersCount / totalOrdersCount) * 100 : 0;
+  const ticketMedio = totalOrdersCount > 0 ? (totalSalesValue / totalOrdersCount) : 0;
+
+  const formatCurrencyLocal = (value: number) => {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <div className="p-6">
@@ -958,6 +1002,27 @@ const Pedidos = () => {
       {/* Orders Table */}
       <Card>
         <CardContent className="p-0">
+          {/* Resumo rápido (reflete os filtros aplicados) */}
+          <div className="p-4 border-b bg-muted/50">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <div className="text-sm text-muted-foreground">Total de vendas</div>
+                <div className="text-lg font-semibold">{formatCurrencyLocal(totalSalesValue)}</div>
+                <div className="text-xs text-muted-foreground">({totalOrdersCount} pedidos)</div>
+              </div>
+              <div>
+                <div className="text-sm text-muted-foreground">Total Pago</div>
+                <div className="text-lg font-semibold text-emerald-600">{formatCurrencyLocal(totalPaidValue)}</div>
+                <div className="text-xs text-muted-foreground">Pagos: <span className="text-emerald-700 font-medium">{paidOrdersCount}</span>  |  Não pagos: <span className="text-red-600 font-medium">{unpaidOrdersCount}</span></div>
+              </div>
+              <div>
+                <div className="text-sm text-muted-foreground">% Pedidos Pagos</div>
+                <div className="text-lg font-semibold">{percentPaid.toFixed(1)}%</div>
+                <div className="text-xs text-muted-foreground">Ticket médio: {formatCurrencyLocal(ticketMedio)}</div>
+              </div>
+            </div>
+          </div>
+
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
@@ -1149,13 +1214,13 @@ const Pedidos = () => {
             </Table>
           </div>
           
-          {orders.length > 0 && (
+          {filteredOrders.length > 0 && (
             <div className="p-4 border-t bg-muted/30">
               <div className="text-sm text-muted-foreground">
-                Total de pedidos: {orders.length} | 
-                Pagos: {orders.filter(o => o.is_paid).length} | 
-                Pendentes: {orders.filter(o => !o.is_paid).length} |
-                Valor total: R$ {orders.reduce((sum, o) => sum + o.total_amount, 0).toFixed(2)}
+                Total de pedidos (filtro): {filteredOrders.length} | 
+                Pagos: {paidOrdersCount} | 
+                Pendentes: {unpaidOrdersCount} |
+                Valor total: {formatCurrencyLocal(totalSalesValue)}
               </div>
             </div>
           )}
