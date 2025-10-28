@@ -22,8 +22,11 @@ export class SessionValidator {
     // 2. Verificar WebSocket connection
     const wsState = sock.ws?.readyState;
     console.log(`🔌 WebSocket State: ${wsState} (1=OPEN, 0=CONNECTING, 2=CLOSING, 3=CLOSED)`);
-    
-    if (wsState !== 1) {
+
+    // Em algumas builds/versões do Baileys o objeto sock pode não expor `ws` diretamente.
+    // Não falhar imediatamente se wsState for undefined — vamos verificar credenciais e keys
+    // antes de rejeitar. Falhar apenas quando wsState é um número diferente de 1.
+    if (typeof wsState === 'number' && wsState !== 1) {
       console.log(`❌ WebSocket não está aberto`);
       console.log(`${'='.repeat(70)}\n`);
       return { valid: false, reason: 'WebSocket não conectado' };
