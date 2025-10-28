@@ -35,27 +35,17 @@ const Sorteio = () => {
   // Função para buscar foto de perfil do WhatsApp
   const getWhatsAppProfilePicture = async (phone: string): Promise<string> => {
     try {
-      // Tentar buscar a foto de perfil real do WhatsApp via edge function
-      const response = await fetch('https://hxtbsieodbtzgcvvkeqx.supabase.co/functions/v1/whatsapp-connection', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh4dGJzaWVvZGJ0emdjdnZrZXF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUyMTkzMDMsImV4cCI6MjA3MDc5NTMwM30.iUYXhv6t2amvUSFsQQZm_jU-ofWD5BGNkj1X0XgCpn4`,
-        },
-        body: JSON.stringify({ 
-          action: 'get_profile_picture',
-          data: { number: phone } 
-        })
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        if (data.profilePicture) {
-          return data.profilePicture;
-        }
+      // Chama o endpoint do backend (/wa-profile) que faz cache e proxy seguro
+      const resp = await fetch(`/wa-profile?phone=${encodeURIComponent(phone)}`);
+      if (resp.ok) {
+        const j = await resp.json();
+        if (j?.url) return j.url;
+      } else {
+        // tentar ler body para debug mas não falhar
+        try { const txt = await resp.text(); console.log('wa-profile resp:', resp.status, txt); } catch(e){}
       }
     } catch (error) {
-      console.log('Erro ao buscar foto do WhatsApp:', error);
+      console.log('Erro ao chamar /wa-profile:', error);
     }
 
     // Fallback: gerar avatar baseado no número
@@ -255,8 +245,19 @@ const Sorteio = () => {
                 <div className="bg-white/50 rounded-lg p-6 space-y-4">
                   <div className="flex flex-col items-center space-y-4">
                     <div className="relative">
-                      <div className="w-32 h-32 bg-gradient-to-br from-amber-400 via-amber-500 to-orange-500 rounded-2xl shadow-2xl flex items-center justify-center transform hover:scale-105 transition-all duration-300 rotate-3 hover:rotate-6 animate-pulse">
-                        <Gift className="w-20 h-20 text-white" strokeWidth={2.5} />
+                      {/* Mostrar foto de perfil do WhatsApp do vencedor quando disponível; caso contrário, fallback */}
+                      <div className="w-32 h-32 rounded-2xl shadow-2xl overflow-hidden transform hover:scale-105 transition-all duration-300 rotate-3 hover:rotate-6">
+                        {winner?.profile_image ? (
+                          <img
+                            src={winner.profile_image}
+                            alt={`Foto de ${winner.customer_name}`}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-amber-400 via-amber-500 to-orange-500 flex items-center justify-center">
+                            <Gift className="w-20 h-20 text-white" strokeWidth={2.5} />
+                          </div>
+                        )}
                       </div>
                       <div className="absolute -top-2 -right-2 w-12 h-12 bg-red-500 rounded-full shadow-lg flex items-center justify-center text-2xl font-bold text-white border-4 border-white">
                         {eligibleCount}
