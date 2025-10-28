@@ -10,10 +10,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { Loader2, Search, RefreshCw, Edit, Trash2, Plus } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { useAuth } from '@/hooks/useAuth';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useTenant } from '@/hooks/useTenant';
-import { normalizeForStorage, normalizeForSending, formatPhoneForDisplay } from '@/lib/phone-utils';
+import { normalizeForStorage, formatPhoneForDisplay } from '@/lib/phone-utils';
 
 
 interface Product {
@@ -39,7 +38,6 @@ interface Order {
 
 const PedidosManual = () => {
   const { toast } = useToast();
-  const { profile } = useAuth();
   const { tenant } = useTenant();
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -98,7 +96,7 @@ const PedidosManual = () => {
       const { data, error } = await supabaseTenant
         .from('orders')
         .select('*')
-        .eq('event_type', 'MANUAL')
+        .eq('event_type', 'BAZAR')
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -122,10 +120,6 @@ const PedidosManual = () => {
 
   const normalizePhone = (phone: string): string => {
     return normalizeForStorage(phone);
-  };
-
-  const formatPhone = (phone: string): string => {
-    return formatPhoneForDisplay(phone);
   };
 
   const handlePhoneChange = (productId: number, value: string) => {
@@ -183,6 +177,7 @@ const PedidosManual = () => {
           .from('orders')
           .select('*')
           .eq('customer_phone', normalizedPhone)
+          .eq('event_type', 'BAZAR')
           .eq('event_date', today)
           .eq('is_paid', false)
           .order('created_at', { ascending: false });
@@ -200,7 +195,7 @@ const PedidosManual = () => {
           
           const { error: updateError } = await supabaseTenant
             .from('orders')
-            .update({ total_amount: newTotal })
+            .update({ total_amount: newTotal, event_type: 'BAZAR' })
             .eq('id', existingOrder.id);
 
           if (updateError) throw updateError;
@@ -218,7 +213,7 @@ const PedidosManual = () => {
             .from('orders')
             .insert([{
               customer_phone: normalizedPhone,
-              event_type: 'MANUAL',
+              event_type: 'BAZAR',
               event_date: today,
               total_amount: subtotal,
               is_paid: false
@@ -234,6 +229,7 @@ const PedidosManual = () => {
                 .from('orders')
                 .select('*')
                 .eq('customer_phone', normalizedPhone)
+                .eq('event_type', 'BAZAR')
                 .eq('event_date', today)
                 .eq('is_paid', false)
                 .order('created_at', { ascending: false })
@@ -247,7 +243,7 @@ const PedidosManual = () => {
                 const newTotal = existingOrder.total_amount + subtotal;
                 const { error: updateError } = await supabaseTenant
                   .from('orders')
-                  .update({ total_amount: newTotal })
+                  .update({ total_amount: newTotal, event_type: 'BAZAR' })
                   .eq('id', existingOrder.id);
 
                 if (updateError) throw updateError;
@@ -281,7 +277,7 @@ const PedidosManual = () => {
           .from('carts')
           .insert({
             customer_phone: normalizedPhone,
-            event_type: 'MANUAL',
+            event_type: 'BAZAR',
             event_date: today,
             status: 'OPEN'
           })
@@ -357,7 +353,31 @@ const PedidosManual = () => {
           : `Novo pedido criado: ${product.code} x${qty} para ${normalizedPhone}. Subtotal: R$ ${subtotal.toFixed(2)}`,
       });
 
-      // WhatsApp será enviado automaticamente pela trigger do banco de dados
+      if (tenant?.id) {
+        try {
+          const { error: whatsappError } = await supabaseTenant.functions.invoke('whatsapp-send-item-added', {
+            body: {
+              tenant_id: tenant.id,
+              customer_phone: normalizedPhone,
+              product_name: product.name,
+              product_code: product.code,
+              quantity: qty,
+              unit_price: product.price
+            }
+          });
+
+          if (whatsappError) {
+            console.error('Error sending WhatsApp message:', whatsappError);
+            toast({
+              title: 'Aviso',
+              description: 'Produto adicionado, mas houve erro ao enviar mensagem WhatsApp',
+              variant: 'default'
+            });
+          }
+        } catch (whatsappError) {
+          console.error('Error sending WhatsApp message:', whatsappError);
+        }
+      }
 
       // Clear inputs for this product
       setPhones(prev => ({ ...prev, [product.id]: '' }));
@@ -396,7 +416,8 @@ const PedidosManual = () => {
         .from('orders')
         .update({
           customer_phone: normalizeForStorage(editPhone),
-          total_amount: parseFloat(editAmount)
+          total_amount: parseFloat(editAmount),
+          event_type: 'BAZAR'
         })
         .eq('id', editingOrder.id);
 
@@ -633,7 +654,7 @@ const PedidosManual = () => {
             <TabsContent value="manage" className="space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle>Pedidos Manuais</CardTitle>
+                  <CardTitle>Pedidos Bazar</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="overflow-x-auto">
@@ -658,7 +679,7 @@ const PedidosManual = () => {
                         ) : orders.length === 0 ? (
                           <TableRow>
                             <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                              Nenhum pedido manual encontrado
+                              Nenhum pedido bazar encontrado
                             </TableCell>
                           </TableRow>
                         ) : (

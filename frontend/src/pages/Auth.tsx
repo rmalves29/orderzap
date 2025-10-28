@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate, useLocation, Link } from "react-router-dom";
-import orderZapsLogo from '@/assets/order-zaps-logo.png';
 
 export default function Auth() {
   const { toast } = useToast();
@@ -91,13 +90,6 @@ export default function Auth() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background">
       <main className="w-full max-w-md p-4">
-        <div className="flex justify-center mb-6">
-          <img 
-            src={orderZapsLogo} 
-            alt="Order Zaps" 
-            className="h-[200px] w-[200px] object-contain"
-          />
-        </div>
         <Card>
           <CardHeader>
             <CardTitle className="text-center">
