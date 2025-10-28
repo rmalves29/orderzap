@@ -102,10 +102,16 @@ export class SessionValidator {
         return false;
       }
 
-      const wsReady = sock.ws && sock.ws.readyState === 1;
-      if (!wsReady) {
-        console.log(`⚠️ [SessionValidator.quickValidate] WebSocket não aberto (readyState=${sock.ws?.readyState})`);
+      // Nota: em algumas versões do Baileys o objeto `ws` pode não estar exposto.
+      // Não devemos falhar imediatamente quando `ws` for undefined — apenas quando
+      // houver um readyState numérico e diferente de 1 (não aberto).
+      const wsReadyState = sock.ws?.readyState;
+      if (typeof wsReadyState === 'number' && wsReadyState !== 1) {
+        console.log(`⚠️ [SessionValidator.quickValidate] WebSocket não aberto (readyState=${wsReadyState})`);
         return false;
+      }
+      if (typeof wsReadyState === 'undefined') {
+        console.log('⚠️ [SessionValidator.quickValidate] WebSocket indefinido — prosseguindo com validação por creds/keys');
       }
 
       if (!sock.authState || !sock.authState.creds || !sock.authState.creds.me) {
