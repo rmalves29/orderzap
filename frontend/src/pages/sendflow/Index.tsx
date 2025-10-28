@@ -39,7 +39,8 @@ export default function SendFlow() {
   const [selectedProducts, setSelectedProducts] = useState<Set<number>>(new Set());
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set());
   const [messageTemplate, setMessageTemplate] = useState('');
-  const [intervalSeconds, setIntervalSeconds] = useState(30);
+  const [perGroupDelaySeconds, setPerGroupDelaySeconds] = useState(10);
+  const [perProductDelayMinutes, setPerProductDelayMinutes] = useState(1);
   
   // Estados de controle
   const [loading, setLoading] = useState(false);
@@ -365,36 +366,36 @@ export default function SendFlow() {
         return;
       }
 
-      // 3. Preparar mensagens
+      // 3. Preparar mensagens e scheduling
       setSendingStatus('sending');
       const selectedProductArray = products.filter(p => selectedProducts.has(p.id));
       const selectedGroupArray = Array.from(selectedGroups);
-      
-      const messages: Array<{ groupId: string; message: string; productName: string }> = [];
-      
-      selectedProductArray.forEach(product => {
-        const personalizedMessage = personalizeMessage(product);
-        selectedGroupArray.forEach(groupId => {
-          messages.push({
-            groupId,
-            message: personalizedMessage,
-            productName: product.name
-          });
-        });
-      });
 
-      setTotalMessages(messages.length);
+      setTotalMessages(selectedProductArray.length * selectedGroupArray.length);
 
-      console.log(`📦 Enviando ${messages.length} mensagens para o backend...`);
+      console.log(`📦 Programando envio de ${selectedProductArray.length * selectedGroupArray.length} mensagens para o backend...`);
 
-      // 4. Enviar todas as mensagens de uma vez para o backend (fila)
+      const payload = {
+        products: selectedProductArray.map(product => ({
+          id: product.id,
+          code: product.code,
+          name: product.name,
+          message: personalizeMessage(product),
+          productName: product.name
+        })),
+        groups: selectedGroupArray,
+        per_group_delay_seconds: perGroupDelaySeconds,
+        per_product_delay_minutes: perProductDelayMinutes
+      };
+
+      // 4. Enviar scheduling para o backend (o backend enfileira com delays)
       const sendResponse = await fetch(`${integration.api_url}/sendflow-batch`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-tenant-id': tenant?.id || ''
         },
-        body: JSON.stringify({ messages })
+        body: JSON.stringify(payload)
       });
 
       if (!sendResponse.ok) {
@@ -406,7 +407,7 @@ export default function SendFlow() {
 
       toast({
         title: '✅ Envio iniciado!',
-        description: `${messages.length} mensagens adicionadas à fila. O envio está acontecendo no background.`,
+        description: `${totalMessages} mensagens adicionadas à fila. O envio está acontecendo no background.`,
         duration: 10000
       });
 
@@ -481,8 +482,8 @@ export default function SendFlow() {
         </Card>
       )}
 
-      {/* Grupos do WhatsApp */}
-      <Card>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <Card>
         <CardHeader>
           <div className="flex justify-between items-center">
             <div className="flex items-center gap-2">
@@ -553,10 +554,10 @@ export default function SendFlow() {
             </div>
           )}
         </CardContent>
-      </Card>
+        </Card>
 
-      {/* Produtos */}
-      <Card>
+        {/* Produtos */}
+        <Card>
         <CardHeader>
           <div className="flex justify-between items-center">
             <div className="flex items-center gap-2">
@@ -622,7 +623,8 @@ export default function SendFlow() {
             </Table>
           )}
         </CardContent>
-      </Card>
+        </Card>
+      </div>
 
       {/* Template de Mensagem */}
       <Card>
@@ -654,18 +656,34 @@ export default function SendFlow() {
           <CardTitle>Configurações de Envio</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div>
-            <Label>Intervalo entre produtos (segundos)</Label>
-            <Input
-              type="number"
-              value={intervalSeconds}
-              onChange={(e) => setIntervalSeconds(Number(e.target.value))}
-              min="5"
-              max="300"
-            />
-            <p className="text-sm text-muted-foreground mt-1">
-              Tempo de espera após enviar todos os grupos de um produto
-            </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <Label>Delay entre grupos (segundos)</Label>
+              <Input
+                type="number"
+                value={perGroupDelaySeconds}
+                onChange={(e) => setPerGroupDelaySeconds(Number(e.target.value))}
+                min={1}
+                max={3600}
+              />
+              <p className="text-sm text-muted-foreground mt-1">
+                Tempo de espera entre envios para grupos consecutivos (por produto)
+              </p>
+            </div>
+
+            <div>
+              <Label>Delay entre produtos (minutos)</Label>
+              <Input
+                type="number"
+                value={perProductDelayMinutes}
+                onChange={(e) => setPerProductDelayMinutes(Number(e.target.value))}
+                min={0}
+                max={1440}
+              />
+              <p className="text-sm text-muted-foreground mt-1">
+                Após finalizar o envio do produto A para todos os grupos, aguardar X minutos antes de enviar o próximo produto
+              </p>
+            </div>
           </div>
         </CardContent>
       </Card>
