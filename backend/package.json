@@ -1,18 +1,16 @@
 {
-  "name": "orderzap-backend",
-  "private": true,
+  "name": "orderzaps-backend",
   "type": "module",
-  "engines": { "node": ">=18" },
   "scripts": {
-    "postinstall": "node node_modules/puppeteer/install.js",
-    "start": "node server-multitenant-clean.js"
+    "start": "node server-multitenant-clean.js",
+    "dev": "nodemon server-multitenant-clean.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
+    "@whiskeysockets/baileys": "^6.7.20",
     "express": "^4.19.2",
-    "node-fetch": "^3.3.2",
-    "puppeteer": "^22.0.0",
-    "qrcode": "^1.5.3",
-    "whatsapp-web.js": "^1.25.0"
+    "dotenv": "^16.4.5",
+    "cors": "^2.8.5",
+    "pino": "^8.0.0",
+    "puppeteer-core": "^22.10.0"
   }
 }
