@@ -1,8 +1,6 @@
 // Carregar variáveis de ambiente do arquivo .env
 import dotenv from 'dotenv';
-// Importar Baileys com os nomes corretos (named imports garantem que
-// useMultiFileAuthState e outras funções sejam carregadas corretamente)
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys';
+import baileys from '@whiskeysockets/baileys';
 import express from 'express';
 import cors from 'cors';
 import qrcode from 'qrcode-terminal';
@@ -19,7 +17,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 
-// Nota: usamos named imports diretamente do pacote @whiskeysockets/baileys
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+} = baileys;
 
 dotenv.config({
   path: path.join(projectRoot, '.env'),
@@ -64,29 +68,10 @@ if (!fs.existsSync(AUTH_DIR)) {
   }
 } else {
   console.log(`✅ Diretório de autenticação já existe: ${AUTH_DIR}`);
-  console.log(`✅ Diretório de autenticação já existe: ${AUTH_DIR}`);
-
 }
 
-// Logger do Pino - nível configurável via env LOG_LEVEL (debug|info|warn|error|silent)
-const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
-// Habilitar pino-pretty se desejar (defina PINO_PRETTY=true no env)
-const USE_PINO_PRETTY = (process.env.PINO_PRETTY === 'true');
-let logger;
-try {
-  if (USE_PINO_PRETTY) {
-    logger = P({ level: LOG_LEVEL, transport: { target: 'pino-pretty', options: { colorize: true } } });
-  } else {
-    logger = P({ level: LOG_LEVEL });
-  }
-} catch (err) {
-  console.error('⚠️ Falha ao inicializar pino-pretty, usando logger padrão:', err.message);
-  logger = P({ level: LOG_LEVEL });
-}
-console.log(`🔍 Logger inicializado (level=${LOG_LEVEL}, pretty=${USE_PINO_PRETTY})`);
-
-// Configuração para imprimir QR no terminal (padrão: true para facilitar testes locais)
-const PRINT_QR_IN_TERMINAL = process.env.PRINT_QR_IN_TERMINAL !== 'false';
+// Logger do Pino (silencioso)
+const logger = P({ level: 'silent' });
 
 // ==================== TENANT MANAGER ====================
 class TenantManager {
@@ -126,21 +111,8 @@ class TenantManager {
 
       // Estado de autenticação
       console.log(`🔑 Carregando estado de autenticação...`);
-      let state, saveCreds;
-      try {
-        if (typeof useMultiFileAuthState !== 'function') {
-          throw new Error('useMultiFileAuthState não está disponível. Verifique a versão de @whiskeysockets/baileys e reinstale as dependências.');
-        }
-        ({ state, saveCreds } = await useMultiFileAuthState(authPath));
-        console.log(`✅ Estado de autenticação carregado`);
-      } catch (err) {
-        console.error('❌ Falha ao carregar estado de autenticação via useMultiFileAuthState:');
-        console.error('   Mensagem:', err.message);
-        console.error('   Dica: No diretório backend execute:');
-        console.error('     npm install @whiskeysockets/baileys dotenv');
-        console.error('   Ou use pnpm: pnpm install');
-        throw err;
-      }
+      const { state, saveCreds } = await useMultiFileAuthState(authPath);
+      console.log(`✅ Estado de autenticação carregado`);
       
       // Buscar versão mais recente do Baileys
       console.log(`🔍 Buscando versão do Baileys...`);
@@ -163,29 +135,10 @@ class TenantManager {
       const sock = makeWASocket({
         version,
         logger,
-        printQRInTerminal: PRINT_QR_IN_TERMINAL,
+        printQRInTerminal: false,
         auth: {
           creds: state.creds,
-          // makeCacheableSignalKeyStore foi introduzido em versões recentes do Baileys;
-          // se não existir, criar um keyStore simples que implementa `get`/`set`/`all`
-          keys: (typeof makeCacheableSignalKeyStore === 'function')
-            ? makeCacheableSignalKeyStore(state.keys, logger)
-            : (function createSimpleKeyStore(initialKeys) {
-                const store = Object.assign({}, initialKeys || {});
-                return {
-                  get: async (key) => {
-                    return store[key] || null;
-                  },
-                  set: async (key, value) => {
-                    store[key] = value;
-                  },
-                  remove: async (key) => {
-                    delete store[key];
-                  },
-                  // útil para debug
-                  all: async () => Object.assign({}, store),
-                };
-              })(state.keys),
+          keys: makeCacheableSignalKeyStore(state.keys, logger),
         },
         browser: ['OrderZaps', 'Chrome', '120.0.0'],
         markOnlineOnConnect: true,
@@ -230,17 +183,24 @@ class TenantManager {
         clientData.qr = null;
 
         // Tratar cada tipo de desconexão
-                    if (statusCode === DisconnectReason.loggedOut) {
-                        // LOGOUT (401): evitar comportamento destrutivo automático durante depuração.
-                        // Em vez de apagar a sessão e reiniciar, marcamos como 'logged_out'
-                        // e aguardamos ação manual (/reset/:tenantId) para regenerar o QR.
-                        console.log(`🔴 LOGOUT (401) detectado para ${tenant.name} - entrando em modo 'logged_out' (não apagando sessão automaticamente)`);
-                        clientData.status = 'logged_out';
-                        clientData.qr = null;
-                        // Notificar no log instruções para o operador
-                        console.log(`ℹ️ Para reconectar: acesse http://localhost:${PORT}/reset/${tenantId} ou remova manualmente a pasta de sessão: ${authPath}`);
-                        // Não deletar client automaticamente aqui — evita loop de criação/apagamento.
-                    } else if (statusCode === DisconnectReason.restartRequired) {
+        if (statusCode === DisconnectReason.loggedOut) {
+          console.log(`🔴 LOGOUT (401) - limpando sessão...`);
+          
+          try {
+            if (fs.existsSync(authPath)) {
+              fs.rmSync(authPath, { recursive: true, force: true });
+              console.log(`🧹 Sessão removida`);
+            }
+          } catch (error) {
+            console.error(`⚠️ Erro ao limpar sessão:`, error.message);
+          }
+          
+          this.clients.delete(tenantId);
+          
+          console.log(`📱 Reiniciando para gerar novo QR Code em 3s...`);
+          setTimeout(() => this.createClient(tenant), 3000);
+          
+        } else if (statusCode === DisconnectReason.restartRequired) {
           console.log(`🔄 RESTART NECESSÁRIO (515) - reconectando em 2s...`);
           this.clients.delete(tenantId);
           setTimeout(() => this.createClient(tenant), 2000);
@@ -378,9 +338,7 @@ class TenantManager {
       console.error(`   Mensagem: ${error.message}`);
       console.error(`   Stack:`, error.stack);
       console.log(`${'='.repeat(70)}\n`);
-      // Marcar status de erro e retornar sem finalizar o processo
-      this.status.set(tenantId, 'error');
-      return null;
+      throw error;
     }
   }
 
@@ -395,13 +353,7 @@ class TenantManager {
       }
 
       const sendFunction = async (msg) => {
-        let sock = this.getOnlineClient(tenantId);
-        if (!sock) {
-          console.log(`⚠️ [Queue] getOnlineClient retornou null para tenant ${tenantId}. Tentando getAuthenticatedClient como fallback...`);
-          sock = this.getAuthenticatedClient(tenantId);
-          if (sock) console.log('⚠️ [Queue] Fallback getAuthenticatedClient bem-sucedido (envio).');
-        }
-
+        const sock = this.getOnlineClient(tenantId);
         if (!sock) {
           throw new Error('WhatsApp desconectado');
         }
@@ -767,22 +719,11 @@ class SupabaseHelper {
 
   async logMessage(tenantId, phone, message, type, metadata = {}) {
     try {
-      // Normalizar apenas quando for um número de telefone (não aplicar para IDs de grupo como xxxxx@g.us)
-      let phoneForDb = phone;
-      try {
-        if (typeof phone === 'string' && !phone.includes('@')) {
-          phoneForDb = ensureDbPhoneDigits(phone);
-        }
-      } catch (e) {
-        console.warn('⚠️ Falha ao normalizar telefone para DB, usando valor original:', phone, e.message || e);
-        phoneForDb = phone;
-      }
-
       await this.request('/rest/v1/whatsapp_messages', {
         method: 'POST',
         body: JSON.stringify({
           tenant_id: tenantId,
-          phone: phoneForDb,
+          phone,
           message,
           type,
           sent_at: new Date().toISOString(),
@@ -944,18 +885,15 @@ function normalizePhone(phone) {
     return '55' + clean + '@s.whatsapp.net';
   }
   
-  // Aplica regra do 9º dígito para envio (regra fornecida pelo cliente):
-  // - Se DDD < 31: deve INCLUIR o 9º dígito (caso não exista)
-  // - Se DDD >= 31: deve REMOVER o 9º dígito (caso exista)
-  if (ddd < 31) {
-    // Se tem 10 dígitos, ADICIONA o 9º dígito
+  // Aplica regra do 9º dígito para envio
+  if (ddd <= 11) {
+    // Norte/Nordeste: Se tem 10 dígitos, ADICIONA o 9º dígito
     if (clean.length === 10) {
       clean = clean.substring(0, 2) + '9' + clean.substring(2);
-      console.log('📤 9º dígito ADICIONADO para envio (DDD < 31):', phone, '→', clean);
+      console.log('📤 9º dígito ADICIONADO para envio (DDD ≤ 11):', phone, '→', clean);
     }
-  } else {
-    // DDD >= 31
-    // Se tem 11 dígitos e o terceiro caractere é '9', REMOVE o 9º dígito
+  } else if (ddd >= 31) {
+    // Sudeste/Sul/Centro-Oeste: Se tem 11 dígitos e começa com 9, REMOVE o 9º dígito
     if (clean.length === 11 && clean[2] === '9') {
       clean = clean.substring(0, 2) + clean.substring(3);
       console.log('📤 9º dígito REMOVIDO para envio (DDD ≥ 31):', phone, '→', clean);
@@ -963,48 +901,6 @@ function normalizePhone(phone) {
   }
   
   return '55' + clean + '@s.whatsapp.net';
-}
-
-/**
- * Garante o formato do telefone salvo no banco aplicando a regra do 9º dígito.
- * Retorna telefone com DDI 55 seguido da parte nacional (somente dígitos).
- * Regra aplicada:
- *  - Se DDD < 31: incluir o 9º dígito caso não exista (10 -> 11)
- *  - Se DDD >= 31: remover o 9º dígito caso exista (11 -> 10)
- */
-function ensureDbPhoneDigits(phone) {
-  if (!phone) return phone;
-  let clean = String(phone).replace(/\D/g, '');
-
-  // garantir DDI
-  if (!clean.startsWith('55')) {
-    clean = '55' + clean;
-  }
-
-  // pegar parte nacional (após DDI)
-  let national = clean.substring(2);
-
-  // Se nacional tem 10 dígitos -> avaliar inclusão do 9
-  if (national.length === 10) {
-    const ddd = parseInt(national.substring(0, 2), 10);
-    if (!isNaN(ddd) && ddd < 31) {
-      // incluir 9 após DDD
-      national = national.substring(0, 2) + '9' + national.substring(2);
-    }
-    // se DDD >= 31 e tem 10 dígitos, mantemos sem o 9
-  }
-
-  // Se nacional tem 11 dígitos -> avaliar remoção do 9
-  if (national.length === 11) {
-    const ddd = parseInt(national.substring(0, 2), 10);
-    if (!isNaN(ddd) && ddd >= 31 && national[2] === '9') {
-      // remover o 9º dígito
-      national = national.substring(0, 2) + national.substring(3);
-    }
-    // caso contrário, mantemos os 11 dígitos
-  }
-
-  return '55' + national;
 }
 
 function delay(ms) {
@@ -1153,113 +1049,6 @@ function createApp(tenantManager, supabaseHelper) {
     }
   });
 
-  // Endpoint para obter/baixar a foto de perfil do WhatsApp e cachear no customers.whatsapp_photo_url
-  app.get('/wa-profile', async (req, res) => {
-    const { tenantId } = req;
-    const phone = req.query.phone;
-
-    if (!phone) {
-      return res.status(400).json({ success: false, error: 'Parâmetro phone é obrigatório' });
-    }
-
-    try {
-      // Vamos tentar múltiplas estratégias para encontrar a foto:
-      // 1) Procurar no customers usando formatos comuns (com/sem DDI 55)
-      // 2) Se tenant WhatsApp estiver autenticado, tentar pegar via Baileys (socket)
-      // 3) Se tudo falhar, retornar 404 para o frontend usar fallback
-
-      const clean = String(phone).replace(/\D/g, '');
-      const candidates = [];
-      // Possíveis formatos para busca no DB
-      if (clean.startsWith('55')) {
-        candidates.push(clean);
-        candidates.push(clean.substring(2));
-      } else {
-        candidates.push('55' + clean);
-        candidates.push(clean);
-      }
-
-      // Normalize unique
-      const uniqueCandidates = Array.from(new Set(candidates));
-
-      let foundUrl = null;
-      let foundPhoneForCache = null;
-
-      for (const candidate of uniqueCandidates) {
-        try {
-          const path = `/rest/v1/customers?phone=eq.${candidate}&select=id,whatsapp_photo_url`;
-          const customers = await supabaseHelper.request(path);
-          if (Array.isArray(customers) && customers.length > 0 && customers[0].whatsapp_photo_url) {
-            foundUrl = customers[0].whatsapp_photo_url;
-            foundPhoneForCache = candidate;
-            console.log(`� Encontrado whatsapp_photo_url cacheado para phone=${candidate}`);
-            break;
-          }
-        } catch (err) {
-          console.warn('⚠️ Erro ao consultar customers para', candidate, err.message || err);
-        }
-      }
-
-      if (foundUrl) {
-        return res.json({ success: true, url: foundUrl, cached: true, phone: foundPhoneForCache });
-      }
-
-      // Tentar buscar via Baileys se o tenant estiver configurado e autenticado
-      if (tenantId) {
-        try {
-          const sock = tenantManager.getAuthenticatedClient(tenantId);
-          if (sock) {
-            // Normalizar para JID de envio
-            const jid = normalizePhone(String(phone));
-            console.log(`🔍 Tentando buscar foto via Baileys para JID=${jid}`);
-
-            // Verificar métodos possíveis no socket (compatibilidade com diferentes versões)
-            let urlFromBaileys = null;
-            try {
-              if (typeof sock.profilePictureUrl === 'function') {
-                urlFromBaileys = await sock.profilePictureUrl(jid).catch(() => null);
-              } else if (typeof sock.fetchProfilePicture === 'function') {
-                urlFromBaileys = await sock.fetchProfilePicture(jid).catch(() => null);
-              } else if (typeof sock.getProfilePicture === 'function') {
-                urlFromBaileys = await sock.getProfilePicture(jid).catch(() => null);
-              }
-            } catch (err) {
-              console.warn('⚠️ Erro ao chamar método de profile picture do Baileys:', err.message || err);
-            }
-
-            if (urlFromBaileys) {
-              // Tentar salvar no customers para cache (usar formato DB preferido)
-              const dbPhoneForCache = ensureDbPhoneDigits(String(phone));
-              try {
-                await supabaseHelper.request(`/rest/v1/customers?phone=eq.${dbPhoneForCache}`, {
-                  method: 'PATCH',
-                  body: JSON.stringify({ whatsapp_photo_url: urlFromBaileys })
-                });
-                console.log(`✅ Foto obtida via Baileys e cacheada para phone=${dbPhoneForCache}`);
-              } catch (err) {
-                console.warn('⚠️ Falha ao salvar whatsapp_photo_url no customers:', err.message || err);
-              }
-
-              return res.json({ success: true, url: urlFromBaileys, cached: false, source: 'baileys' });
-            }
-          } else {
-            console.log('ℹ️ Tenant não autenticado/no socket disponível para buscar foto via Baileys');
-          }
-        } catch (err) {
-          console.warn('⚠️ Erro ao tentar buscar foto via Baileys:', err.message || err);
-        }
-      } else {
-        console.log('ℹ️ tenantId não fornecido na requisição, pulando busca via Baileys');
-      }
-
-      // Se chegou aqui, não encontramos foto
-      return res.status(404).json({ success: false, error: 'Foto não disponível' });
-    } catch (error) {
-      console.error('Erro no /wa-profile:', error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
   // NOVO: Endpoint para forçar reset e gerar novo QR
   app.post('/reset/:tenantId', async (req, res) => {
     const { tenantId } = req.params;
@@ -1383,86 +1172,6 @@ function createApp(tenantManager, supabaseHelper) {
     });
   });
 
-  // ADMIN: Corrigir telefones salvos no banco para incluir/remover 9º dígito seguindo regra
-  // Aceita opcionalmente header x-tenant-id ou query ?tenant_id=<id>
-  app.post('/admin/fix-phones', async (req, res) => {
-    const { tenantId } = req;
-    console.log('\n' + '='.repeat(70));
-    console.log('🔧 INICIANDO FIX DE TELEFONES NO BANCO');
-    console.log('🏢 Tenant filter:', tenantId || 'NENHUM (todos)');
-    console.log('='.repeat(70) + '\n');
-
-    const tables = [
-      { name: 'carts', field: 'customer_phone' },
-      { name: 'orders', field: 'customer_phone' },
-      { name: 'whatsapp_messages', field: 'phone' },
-      { name: 'customer_whatsapp_groups', field: 'customer_phone' }
-    ];
-
-    const summary = {};
-
-    try {
-      for (const t of tables) {
-        console.log(`🔎 Processando tabela: ${t.name} (campo: ${t.field})`);
-
-        let path = `/rest/v1/${t.name}?select=id,${t.field}`;
-        if (tenantId) {
-          path += `&tenant_id=eq.${tenantId}`;
-        }
-
-        // Limite razoável para evitar travar - pode ser ajustado
-        path += '&limit=1000';
-
-        const rows = await supabaseHelper.request(path);
-        if (!Array.isArray(rows)) {
-          console.log(`⚠️ Nenhum registro retornado para ${t.name}`);
-          summary[t.name] = { scanned: 0, updated: 0 };
-          continue;
-        }
-
-        let scanned = 0;
-        let updated = 0;
-
-        for (const row of rows) {
-          scanned++;
-          const original = row[t.field];
-          if (!original) continue;
-
-          let fixed;
-          try {
-            fixed = ensureDbPhoneDigits(String(original));
-          } catch (err) {
-            console.warn(`⚠️ Falha ao normalizar telefone (id=${row.id})`, err.message || err);
-            continue;
-          }
-
-          if (!fixed || fixed === original) continue;
-
-          // Atualizar registro
-          try {
-            await supabaseHelper.request(`/rest/v1/${t.name}?id=eq.${row.id}`, {
-              method: 'PATCH',
-              body: JSON.stringify({ [t.field]: fixed })
-            });
-            updated++;
-            console.log(`✅ Atualizado ${t.name} id=${row.id}: ${original} → ${fixed}`);
-          } catch (err) {
-            console.error(`❌ Erro ao atualizar ${t.name} id=${row.id}:`, err.message || err);
-          }
-        }
-
-        summary[t.name] = { scanned, updated };
-        console.log(`🔁 Tabela ${t.name} - scanned=${scanned} updated=${updated}\n`);
-      }
-
-      console.log('🎉 FIX DE TELEFONES CONCLUÍDO');
-      return res.json({ success: true, summary });
-    } catch (error) {
-      console.error('❌ Erro no fix de telefones:', error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
   app.post('/send-group', async (req, res) => {
     const { tenantId } = req;
     const { groupId, message } = req.body;
@@ -1492,16 +1201,7 @@ function createApp(tenantManager, supabaseHelper) {
       });
     }
 
-    let sock = tenantManager.getOnlineClient(tenantId);
-    if (!sock) {
-      // Fallback: tentar obter cliente autenticado (menos restritivo) para permitir envio
-      console.log(`⚠️ getOnlineClient retornou null para tenant ${tenantId}. Tentando getAuthenticatedClient como fallback...`);
-      sock = tenantManager.getAuthenticatedClient(tenantId);
-      if (sock) {
-        console.log(`⚠️ Fallback para getAuthenticatedClient bem-sucedido (envio com menor verificação).`);
-      }
-    }
-
+    const sock = tenantManager.getOnlineClient(tenantId);
     if (!sock) {
       const clientData = tenantManager.clients.get(tenantId);
       const currentStatus = clientData?.status || 'não inicializado';
@@ -1628,112 +1328,57 @@ function createApp(tenantManager, supabaseHelper) {
   // Nova rota: SendFlow com fila de mensagens (batch)
   app.post('/sendflow-batch', async (req, res) => {
     const { tenantId } = req;
-    const body = req.body || {};
+    const { messages } = req.body; // Array de { groupId, message, productName }
 
     console.log(`\n${'='.repeat(70)}`);
     console.log(`📦 SENDFLOW BATCH - Recebendo lote de mensagens`);
     console.log(`${'='.repeat(70)}`);
     console.log(`🏢 Tenant ID: ${tenantId}`);
+    console.log(`📨 Total de mensagens: ${messages?.length || 0}`);
 
-    // Backward compatibility: if 'messages' array provided, keep previous behavior
-    if (Array.isArray(body.messages) && body.messages.length > 0) {
-      const messages = body.messages;
-      console.log(`📨 Total de mensagens (legacy): ${messages.length}`);
-
-      messages.forEach(msg => {
-        tenantManager.messageQueue.enqueue(tenantId, {
-          groupId: msg.groupId,
-          message: msg.message,
-          productName: msg.productName || 'N/A'
-        });
-      });
-
-      console.log(`✅ ${messages.length} mensagens adicionadas à fila (legacy)`);
-
-      res.json({ 
-        success: true, 
-        message: `${messages.length} mensagens adicionadas à fila (legacy)`,
-        queueSize: tenantManager.messageQueue.getQueueSize(tenantId)
-      });
-
-      setImmediate(() => {
-        if (tenantManager) {
-          tenantManager.processQueueForTenant(tenantId).catch(err => {
-            console.error('❌ Erro ao processar fila (processQueueForTenant):', err);
-          });
-        }
-      });
-
-      return;
-    }
-
-    // New scheduling API: products + groups + per_group_delay_seconds + per_product_delay_minutes
-    const products = Array.isArray(body.products) ? body.products : null;
-    const groups = Array.isArray(body.groups) ? body.groups : null;
-    const perGroupDelaySeconds = Number(body.per_group_delay_seconds || 2);
-    const perProductDelayMinutes = Number(body.per_product_delay_minutes || 0);
-
-    if (!tenantId || !products || !groups || products.length === 0 || groups.length === 0) {
-      console.log(`❌ Parâmetros inválidos para scheduling`);
+    if (!tenantId || !messages || !Array.isArray(messages) || messages.length === 0) {
+      console.log(`❌ Parâmetros inválidos`);
       console.log(`${'='.repeat(70)}\n`);
       return res.status(400).json({ 
         success: false, 
-        error: 'tenant_id, products (array) e groups (array) são obrigatórios para scheduling' 
+        error: 'tenant_id e messages (array) são obrigatórios' 
       });
     }
 
-    const perGroupDelayMs = Math.max(0, perGroupDelaySeconds) * 1000;
-    const perProductDelayMs = Math.max(0, perProductDelayMinutes) * 60 * 1000;
-
-    let scheduledCount = 0;
-    const totalProducts = products.length;
-    const totalGroups = groups.length;
-
-    console.log(`📨 Scheduling ${totalProducts} produto(s) × ${totalGroups} grupo(s)`);
-    console.log(`⏱️ Delay entre grupos: ${perGroupDelaySeconds}s | Delay entre produtos: ${perProductDelayMinutes}min`);
-
-    // Agendar enqueues sem bloquear a resposta
-    for (let p = 0; p < products.length; p++) {
-      const product = products[p];
-
-      // tempo inicial para este produto = p * (totalGroups * perGroupDelayMs + perProductDelayMs)
-      const startTimeForProduct = p * ((totalGroups * perGroupDelayMs) + perProductDelayMs);
-
-      for (let g = 0; g < groups.length; g++) {
-        const groupId = groups[g];
-        const offset = startTimeForProduct + (g * perGroupDelayMs);
-
-        setTimeout(() => {
-          tenantManager.messageQueue.enqueue(tenantId, {
-            groupId,
-            message: product.message,
-            productName: product.productName || product.name || 'N/A'
-          });
-
-          scheduledCount++;
-          console.log(`✅ Scheduled message for tenant=${tenantId} product=${product.id} group=${groupId} (offset ${offset}ms)`);
-
-          // Start processing the queue (will be a no-op if already processing)
-          setImmediate(() => {
-            if (tenantManager) {
-              tenantManager.processQueueForTenant(tenantId).catch(err => {
-                console.error('❌ Erro ao processar fila (processQueueForTenant):', err);
-              });
-            }
-          });
-
-        }, offset);
+      // Não bloquear enfileiramento caso a sessão esteja temporariamente indisponível.
+      const isOnline = !!tenantManager?.getOnlineClient(tenantId);
+      if (!isOnline) {
+        console.log(`⚠️ Sessão não online no momento; as mensagens serão enfileiradas e enviadas quando o WhatsApp reconectar`);
+      } else {
+        console.log(`✅ Sessão online - adicionando ${messages.length} mensagens à fila`);
       }
-    }
 
-    const estimatedTotalTimeMs = ((totalProducts - 1) * ((totalGroups * perGroupDelayMs) + perProductDelayMs)) + ((totalGroups - 1) * perGroupDelayMs);
+    // Adicionar todas as mensagens na fila
+    messages.forEach(msg => {
+      tenantManager.messageQueue.enqueue(tenantId, {
+        groupId: msg.groupId,
+        message: msg.message,
+        productName: msg.productName || 'N/A'
+      });
+    });
 
+    console.log(`✅ ${messages.length} mensagens adicionadas à fila`);
+    console.log(`${'='.repeat(70)}\n`);
+
+    // Responder imediatamente
     res.json({ 
       success: true, 
-      message: `${totalProducts * totalGroups} mensagens agendadas`,
-      scheduled: totalProducts * totalGroups,
-      estimated_total_time_ms: estimatedTotalTimeMs,
+      message: `${messages.length} mensagens adicionadas à fila`,
       queueSize: tenantManager.messageQueue.getQueueSize(tenantId)
+    });
+
+    // Iniciar processamento da fila (assíncrono) - TenantManager centraliza lógica de envio
+    setImmediate(() => {
+      if (tenantManager) {
+        tenantManager.processQueueForTenant(tenantId).catch(err => {
+          console.error('❌ Erro ao processar fila (processQueueForTenant):', err);
+        });
+      }
     });
   });
 
@@ -1748,13 +1393,7 @@ function createApp(tenantManager, supabaseHelper) {
       });
     }
 
-    let sock = tenantManager.getOnlineClient(tenantId);
-    if (!sock) {
-      console.log(`⚠️ getOnlineClient retornou null para tenant ${tenantId} (endpoint /send). Tentando getAuthenticatedClient como fallback...`);
-      sock = tenantManager.getAuthenticatedClient(tenantId);
-      if (sock) console.log('⚠️ Fallback getAuthenticatedClient bem-sucedido (endpoint /send).');
-    }
-
+    const sock = tenantManager.getOnlineClient(tenantId);
     if (!sock) {
       const clientData = tenantManager.clients.get(tenantId);
       return res.status(503).json({ 
@@ -1906,23 +1545,7 @@ async function main() {
   console.log('   que é chamada automaticamente pela whatsapp-process-message\n');
 }
 
-// Tornar a inicialização resiliente: em vez de sair no primeiro erro,
-// tentamos reiniciar em loop com backoff. Isso evita que o processo
-// finalize imediatamente quando houver problemas temporários (ex: falha
-// ao criar cliente, logout inesperado etc.).
-async function startWithRetry() {
-  while (true) {
-    try {
-      await main();
-      // Se main retorna (servidor finalizado intencionalmente), quebramos o loop
-      break;
-    } catch (error) {
-      console.error('❌ Erro fatal na inicialização (servidor continuará tentando):', error);
-      console.log('🔁 Tentando reiniciar em 5 segundos...');
-      // esperar antes de tentar novamente
-      await delay(5000);
-    }
-  }
-}
-
-startWithRetry();
+main().catch(error => {
+  console.error('❌ Erro fatal:', error);
+  process.exit(1);
+});
