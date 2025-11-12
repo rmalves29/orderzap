@@ -10,7 +10,7 @@ console.log('🚀 WhatsApp Server SIMPLES - 1 Tenant');
 console.log('=====================================\n');
 
 // Configurações
-const TENANT_ID = '08f2b1b9-3988-489e-8186-c60f0c0b0622'; // MANIA DE MULHER
+const TENANT_ID = '217ec5a3-f5c5-4ec4-90fa-8e6b518fd4f6'; // MANIA DE MULHER
 const AUTH_DIR = '.wwebjs_auth_simple';
 
 console.log(`📋 Tenant ID: ${TENANT_ID}`);
