@@ -4,6 +4,8 @@
   "scripts": {
     "start": "node server-multitenant-clean.js",
     "dev": "nodemon server-multitenant-clean.js"
+    "build": "pnpm run build",
+    "start": "pnpm run start"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.20",
