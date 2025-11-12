@@ -5,16 +5,16 @@
   "main": "server-multitenant-clean.js",
   "type": "commonjs",
   "engines": { "node": ">=18" },
+{
   "scripts": {
-    "start": "node server-multitenant-clean.js",
-    "start:dev": "NODE_ENV=development node server-multitenant-clean.js"
+    "postinstall": "node node_modules/puppeteer/install.js",
+    "start": "node server-multitenant-clean.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "node-fetch": "^3.3.2",
+    "whatsapp-web.js": "^1.25.0",
+    "puppeteer": "^22.0.0",
     "qrcode": "^1.5.3",
-    "whatsapp-web.js": "^1.23.0"
-  },
-  "packageManager": "pnpm@9.0.0"
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
 }
