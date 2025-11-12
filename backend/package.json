@@ -4,10 +4,9 @@
   "private": true,
   "type": "module",
   "main": "server1.js",
-  "scripts": {
-    "start": "node server1.js",
-    "dev": "node --watch server1.js"
-  },
+"scripts": {
+  "start": "node server-multi-tenant-orderzaps-v4.1.js"}
+    "dev": "node --watch server1.js"  },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.20",
     "cors": "^2.8.5",
