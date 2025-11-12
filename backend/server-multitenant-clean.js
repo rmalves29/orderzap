@@ -1,415 +1,277 @@
 /**
- * ========================================
- * WhatsApp Multi‑Tenant Server – Clean Architecture v4.1
- * ========================================
+ * OrderZaps – WhatsApp Multi‑Tenant Server (Fixed)
+ * v4.2
  *
- * • Um único app (Railway) atendendo N empresas por SUBDOMÍNIO ou header X-Tenant-Id
- * • Sessões iniciadas sob demanda (lazy) e isoladas por tenant
- * • QR Code via endpoint /qr (sem depender de terminal)
- * • Persistência de sessão em volume (/data) – recomendável no Railway
- * • Supabase usado apenas via SERVICE_ROLE em variável de ambiente (NÃO hardcode)
- * • Puppeteer headless, compatível com Railway (Linux)
- *
- * Autor: Sistema OrderZaps
+ * Correções principais:
+ * - Rotas /qr/:tenantId e /reset/:tenantId adicionadas
+ * - /status e /status/:tenantId mais verbosas
+ * - Carga de tenants a partir do Supabase (is_active=true)
+ * - Sessões isoladas por tenant em AUTH_DIR/tenant_<id>
+ * - Geração de QR em DataURL para consumo no frontend
+ * - Puppeteer headless e flags compatíveis com Railway
  */
 
-// ===================== Dependências =====================
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { Client, LocalAuth } = require('whatsapp-web.js');
+const QRCode = require('qrcode');
 
-// Polyfill fetch (Node < 18)
+// Polyfill fetch em Node <18
 if (typeof fetch !== 'function') {
   global.fetch = require('node-fetch');
 }
 
-// ===================== Configurações =====================
+// ======================== CONFIG ========================
 const CONFIG = {
-  PORT: Number(process.env.PORT || 8080),
-  // Preferir volume montado no Railway em /data
-  AUTH_DIR: process.env.AUTH_DIR || '/data/.wwebjs_auth',
-
-  // Supabase
-  SUPABASE_URL: process.env.SUPABASE_URL, // ex: https://xxxxx.supabase.co
-  SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY, // ***NÃO hardcode***
-
-  // CORS (se quiser restringir)
-  ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || '*')
-    .split(',')
-    .map((s) => s.trim()),
+  PORT: process.env.PORT || 8080,
+  AUTH_DIR: process.env.AUTH_DIR || path.join(__dirname, '.wwebjs_auth'),
+  SUPABASE_URL: process.env.SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL || 'http://localhost:8080',
 };
 
-// Valida envs críticas
-if (!CONFIG.SUPABASE_URL) console.warn('⚠️  SUPABASE_URL não configurado');
-if (!CONFIG.SUPABASE_SERVICE_KEY) console.warn('⚠️  SUPABASE_SERVICE_KEY não configurado');
-
-// Garante diretório de auth
-try {
-  fs.mkdirSync(CONFIG.AUTH_DIR, { recursive: true });
-} catch (_) {}
-
-// ===================== Helpers: Supabase =====================
-class SupabaseHelper {
-  static async request(pathname, options = {}) {
-    if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_SERVICE_KEY) {
-      throw new Error('Supabase não configurado (SUPABASE_URL/SUPABASE_SERVICE_KEY)');
-    }
-    const url = `${CONFIG.SUPABASE_URL}/rest/v1${pathname}`;
-    const headers = {
-      apikey: CONFIG.SUPABASE_SERVICE_KEY,
-      Authorization: `Bearer ${CONFIG.SUPABASE_SERVICE_KEY}`,
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
-    const resp = await fetch(url, { ...options, headers });
-    if (!resp.ok) {
-      const txt = await resp.text();
-      throw new Error(`Supabase ${resp.status}: ${txt}`);
-    }
-    return resp.json();
-  }
-
-  static async loadActiveTenants() {
-    // usado apenas se quiser pré-carregar (não obrigatório no modo lazy)
-    try {
-      return await this.request('/tenants?select=id,name,slug,is_active&is_active=eq.true');
-    } catch (e) {
-      console.error('❌ Erro ao carregar tenants:', e.message);
-      return [];
-    }
-  }
-
-  static async resolveTenantBySlug(slug) {
-    try {
-      const list = await this.request(
-        `/tenants?select=id,name,slug,is_active&slug=eq.${slug}&is_active=eq.true&limit=1`
-      );
-      return list[0] || null;
-    } catch (e) {
-      console.error('❌ Erro ao buscar tenant por slug:', e.message);
-      return null;
-    }
-  }
-
-  static async resolveTenantById(id) {
-    try {
-      const list = await this.request(
-        `/tenants?select=id,name,slug,is_active&id=eq.${id}&is_active=eq.true&limit=1`
-      );
-      return list[0] || null;
-    } catch (e) {
-      console.error('❌ Erro ao buscar tenant por id:', e.message);
-      return null;
-    }
-  }
-
-  static async logMessage(tenant_id, phone, message, type, metadata = {}) {
-    try {
-      await this.request('/whatsapp_messages', {
-        method: 'POST',
-        body: JSON.stringify({
-          tenant_id,
-          phone,
-          message,
-          type, // 'outgoing' | 'incoming'
-          sent_at: type === 'outgoing' ? new Date().toISOString() : null,
-          received_at: type === 'incoming' ? new Date().toISOString() : null,
-          ...metadata,
-        }),
-      });
-    } catch (e) {
-      console.error('⚠️  Erro ao salvar log:', e.message);
-    }
-  }
+if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('\n❌ Variáveis do Supabase ausentes.');
+  console.error('  Necessárias: SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY');
+  process.exit(1);
 }
 
-// ===================== Tenant Manager =====================
+// Garante diretório base
+fs.mkdirSync(CONFIG.AUTH_DIR, { recursive: true });
+
+// ===================== SUPABASE HELPER ==================
+const Supabase = {
+  async request(pathname, init = {}) {
+    const url = `${CONFIG.SUPABASE_URL}/rest/v1${pathname}`;
+    const headers = {
+      apikey: CONFIG.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation'
+    };
+    const res = await fetch(url, { ...init, headers: { ...headers, ...(init.headers || {}) } });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Supabase ${res.status}: ${text}`);
+    }
+    return res.json();
+  },
+  async loadActiveTenants() {
+    // Espera tabela tenants com colunas: id (uuid), name, slug, is_active
+    return this.request('/tenants?select=id,name,slug,is_active&is_active=eq.true');
+  }
+};
+
+// ===================== TENANT MANAGER ===================
 class TenantManager {
   constructor() {
-    this.clients = new Map(); // tenantId -> Client
-    this.status = new Map(); // tenantId -> status
-    this.authDirs = new Map(); // tenantId -> auth path
-    this.qrCache = new Map(); // tenantId -> { raw, dataURL? }
+    this.clients = new Map(); // id -> Client
+    this.status = new Map();  // id -> status
+    this.qr = new Map();      // id -> { raw, dataUrl, updatedAt }
+    this.authDir = new Map(); // id -> path
   }
 
-  createAuthDir(tenantId) {
+  getAuthDir(tenantId) {
     const dir = path.join(CONFIG.AUTH_DIR, `tenant_${tenantId}`);
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-      this.authDirs.set(tenantId, dir);
-    } catch (_) {}
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    this.authDir.set(tenantId, dir);
     return dir;
   }
 
   async createClient(tenant) {
     const tenantId = tenant.id;
-    if (this.clients.get(tenantId)) return this.clients.get(tenantId);
-
-    const authDir = this.createAuthDir(tenantId);
-    console.log(`\n${'='.repeat(70)}\n🔧 Inicializando sessão: ${tenant.name} (${tenant.slug})\n🆔 ${tenantId}\n📂 ${authDir}\n${'='.repeat(70)}`);
+    const authPath = this.getAuthDir(tenantId);
 
     const client = new Client({
-      authStrategy: new LocalAuth({ clientId: `tenant_${tenantId}`, dataPath: authDir }),
+      authStrategy: new LocalAuth({ clientId: `tenant_${tenantId}`, dataPath: authPath }),
       puppeteer: {
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-        timeout: 60000,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--disable-gpu',
+        ],
+        timeout: 60000
       },
-      qrMaxRetries: 10,
+      qrMaxRetries: 10
     });
 
+    // ---- Events
     client.on('qr', async (qr) => {
-      this.status.set(tenantId, 'qr_code');
-      // Tenta gerar DataURL (se lib qrcode estiver instalada). Caso contrário, guarda raw.
       try {
-        const qrcode = require('qrcode');
-        const dataURL = await qrcode.toDataURL(qr);
-        this.qrCache.set(tenantId, { raw: qr, dataURL });
-      } catch (_) {
-        this.qrCache.set(tenantId, { raw: qr });
+        const dataUrl = await QRCode.toDataURL(qr);
+        this.qr.set(tenantId, { raw: qr, dataUrl, updatedAt: new Date().toISOString() });
+        this.status.set(tenantId, 'qr_code');
+        console.log(`📱 [${tenant.slug}] QR gerado`);
+      } catch (e) {
+        console.error(`Erro ao gerar DataURL do QR (${tenant.slug}):`, e.message);
       }
-      console.log(`📱 QR atualizado para ${tenant.slug}`);
     });
 
     client.on('authenticated', () => {
       this.status.set(tenantId, 'authenticated');
-      console.log(`🔐 ${tenant.slug}: autenticado`);
+      console.log(`🔐 [${tenant.slug}] autenticado`);
     });
 
     client.on('ready', () => {
       this.status.set(tenantId, 'online');
-      this.qrCache.delete(tenantId);
-      console.log(`✅ ${tenant.slug}: CONECTADO`);
+      console.log(`✅ [${tenant.slug}] pronto/online`);
     });
 
-    client.on('auth_failure', (m) => {
+    client.on('auth_failure', (msg) => {
       this.status.set(tenantId, 'auth_failure');
-      console.error(`❌ ${tenant.slug}: falha autenticação`, m);
+      console.error(`❌ [${tenant.slug}] falha de autenticação: ${msg}`);
     });
 
     client.on('disconnected', (reason) => {
       this.status.set(tenantId, 'offline');
-      console.warn(`🔌 ${tenant.slug}: desconectado (${reason}) – tentando reiniciar em 10s`);
+      console.warn(`🔌 [${tenant.slug}] desconectado (${reason}) – tentando reconectar em 10s`);
       setTimeout(() => client.initialize().catch(() => {}), 10000);
     });
 
     this.clients.set(tenantId, client);
     this.status.set(tenantId, 'initializing');
 
-    try {
-      await client.initialize();
-    } catch (e) {
+    // Start
+    client.initialize().catch((e) => {
       this.status.set(tenantId, 'error');
-      console.error(`💥 Erro ao iniciar ${tenant.slug}:`, e.message);
-    }
+      console.error(`💥 [${tenant.slug}] erro ao inicializar:`, e.message);
+    });
 
     return client;
   }
 
-  async getOnlineClient(tenantId) {
-    const client = this.clients.get(tenantId);
-    const stat = this.status.get(tenantId);
-    if (!client || stat !== 'online') return null;
-    try {
-      const s = await client.getState();
-      return s === 'CONNECTED' ? client : null;
-    } catch (_) {
-      return null;
-    }
-  }
+  getClient(tenantId) { return this.clients.get(tenantId) || null; }
+  getStatus(tenantId) { return this.status.get(tenantId) || 'not_found'; }
+  getQR(tenantId) { return this.qr.get(tenantId) || null; }
 
-  getAllStatus() {
-    const out = {};
-    for (const [tenantId] of this.clients) {
-      out[tenantId] = { status: this.status.get(tenantId) || 'unknown' };
+  async resetTenant(tenantId) {
+    const cli = this.clients.get(tenantId);
+    if (cli) {
+      try { await cli.logout().catch(() => {}); } catch (_) {}
+      try { await cli.destroy().catch(() => {}); } catch (_) {}
+      this.clients.delete(tenantId);
     }
-    return out;
-  }
-
-  getTenantStatus(tenantId) {
-    return { status: this.status.get(tenantId) || 'not_found' };
+    // remove pasta de sessão
+    const dir = this.authDir.get(tenantId) || this.getAuthDir(tenantId);
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+    fs.mkdirSync(dir, { recursive: true });
+    this.status.set(tenantId, 'reset');
+    this.qr.delete(tenantId);
   }
 }
 
-// ===================== Utils =====================
-function normalizePhoneBR(phone) {
-  if (!phone) return phone;
-  const clean = String(phone).replace(/\D/g, '');
-  const withoutDDI = clean.startsWith('55') ? clean.slice(2) : clean;
-  let n = withoutDDI;
-  if (n.length === 10) {
-    const ddd = n.slice(0, 2);
-    if (Number(ddd) >= 11) n = `${ddd}9${n.slice(2)}`;
+const tenantsMgr = new TenantManager();
+
+// ================ BOOT: carregar tenants ================
+async function bootTenants() {
+  console.log('🔍 Carregando tenants ativos do Supabase...');
+  const tenants = await Supabase.loadActiveTenants();
+  if (!tenants?.length) {
+    console.warn('⚠️ Nenhum tenant ativo encontrado.');
+    return;
   }
-  return `55${n}`;
+  console.log(`✅ ${tenants.length} tenant(s) encontrado(s). Inicializando...`);
+  for (const t of tenants) {
+    await tenantsMgr.createClient(t);
+  }
 }
 
-function getSubdomain(host) {
-  if (!host) return null;
-  const h = String(host).split(':')[0];
-  const parts = h.split('.');
-  if (parts.length < 3) return null; // ex.: api.orderzaps.com -> sem sub útil
-  return parts[0];
-}
+// ======================= EXPRESS ========================
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
 
-// ===================== App (Express) =====================
-async function createApp(tenantManager) {
-  const app = express();
-
-  // CORS
-  app.use(
-    cors({
-      origin: (origin, cb) => {
-        if (!origin || CONFIG.ALLOWED_ORIGINS.includes('*')) return cb(null, true);
-        const ok = CONFIG.ALLOWED_ORIGINS.some((o) => origin.includes(o));
-        return cb(null, ok);
-      },
-      credentials: true,
-    })
-  );
-
-  app.use(express.json({ limit: '10mb' }));
-
-  // ====== Middleware: resolve tenant por header/body ======
-  app.use((req, _res, next) => {
-    let tenantId =
-      req.headers['x-tenant-id'] ||
-      req.headers['X-Tenant-Id'] ||
-      req.query.tenant_id ||
-      (req.body && req.body.tenant_id);
-
-    if (tenantId) {
-      tenantId = String(tenantId).split(',')[0].trim();
-      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (uuid.test(tenantId)) req.tenantId = tenantId;
-    }
-    next();
-  });
-
-  // ====== Middleware: resolve tenant por subdomínio ======
-  app.use(async (req, _res, next) => {
-    if (req.tenantId) return next();
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const slug = getSubdomain(host);
-    if (!slug) return next();
-    const t = await SupabaseHelper.resolveTenantBySlug(slug);
-    if (t?.id) req.tenantId = t.id;
-    next();
-  });
-
-  // ====== Health ======
-  app.get('/health', (_req, res) => {
-    res.json({ ok: true, status: 'online', time: new Date().toISOString(), version: '4.1' });
-  });
-
-  // ====== Status geral ======
-  app.get('/status', (_req, res) => {
-    res.json({ ok: true, tenants: tenantManager.getAllStatus() });
-  });
-
-  // ====== Status do tenant resolvido ======
-  app.get('/status-tenant', (req, res) => {
-    if (!req.tenantId) return res.status(400).json({ ok: false, error: 'Tenant não resolvido' });
-    res.json({ ok: true, tenantId: req.tenantId, ...tenantManager.getTenantStatus(req.tenantId) });
-  });
-
-  // ====== Status por id ======
-  app.get('/status/:tenantId', (req, res) => {
-    res.json({ ok: true, tenantId: req.params.tenantId, ...tenantManager.getTenantStatus(req.params.tenantId) });
-  });
-
-  // ====== QR do tenant resolvido ======
-  app.get('/qr', (req, res) => {
-    if (!req.tenantId) return res.status(400).json({ ok: false, error: 'Tenant não resolvido' });
-    const entry = tenantManager.qrCache.get(req.tenantId);
-    if (!entry) return res.status(204).end();
-    res.json({ ok: true, tenantId: req.tenantId, qr: entry.raw, qrDataURL: entry.dataURL || null });
-  });
-
-  // ====== Conectar (força iniciar sessão) ======
-  app.post('/connect', async (req, res) => {
-    try {
-      if (!req.tenantId) return res.status(400).json({ ok: false, error: 'Tenant não resolvido' });
-      let t = await SupabaseHelper.resolveTenantById(req.tenantId);
-      if (!t) return res.status(404).json({ ok: false, error: 'Tenant não encontrado ou inativo' });
-      await tenantManager.createClient(t);
-      res.json({ ok: true, tenantId: req.tenantId, status: tenantManager.getTenantStatus(req.tenantId).status });
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
-    }
-  });
-
-  // ====== Enviar mensagem ======
-  app.post('/send', async (req, res) => {
-    try {
-      if (!req.tenantId) return res.status(400).json({ ok: false, error: 'Tenant não resolvido' });
-      const { number, phone, message } = req.body || {};
-      const to = number || phone;
-      if (!to || !message) return res.status(400).json({ ok: false, error: 'Número e mensagem são obrigatórios' });
-
-      // Tenta cliente online
-      let client = await tenantManager.getOnlineClient(req.tenantId);
-      if (!client) {
-        // lazy start
-        const t = await SupabaseHelper.resolveTenantById(req.tenantId);
-        if (!t) return res.status(404).json({ ok: false, error: 'Tenant não encontrado ou inativo' });
-        await tenantManager.createClient(t);
-        client = await tenantManager.getOnlineClient(req.tenantId);
-        if (!client) {
-          // pode estar em QR / initializing
-          const s = tenantManager.getTenantStatus(req.tenantId).status;
-          return res.status(503).json({ ok: false, error: 'WhatsApp não conectado', status: s });
-        }
-      }
-
-      const normalized = normalizePhoneBR(to);
-      const chatId = `${normalized}@c.us`;
-      await client.sendMessage(chatId, message);
-      SupabaseHelper.logMessage(req.tenantId, normalized, message, 'outgoing').catch(() => {});
-      res.json({ ok: true, tenantId: req.tenantId, to: normalized });
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
-    }
-  });
-
-  // ====== 404 ======
-  app.use((_req, res) => res.status(404).json({ ok: false, error: 'Rota não encontrada' }));
-
-  return app;
-}
-
-// ===================== Bootstrap =====================
-async function main() {
-  console.log(`\n${'='.repeat(70)}\n🚀 WhatsApp Multi‑Tenant – v4.1 (lazy sessions)\nAuth: ${CONFIG.AUTH_DIR}\nPort: ${CONFIG.PORT}\n${'='.repeat(70)}\n`);
-  const manager = new TenantManager();
-  const app = await createApp(manager);
-  app.listen(CONFIG.PORT, () => console.log(`▶️  HTTP ${CONFIG.PORT}`));
-}
-
-main().catch((e) => {
-  console.error('❌ Erro fatal:', e);
-  process.exit(1);
+// Health
+app.get('/health', (req, res) => {
+  res.json({ ok: true, status: 'online', ts: new Date().toISOString(), version: '4.2' });
 });
 
-/*
-========================================
-.env exemplo (Railway Variables)
-========================================
-PORT=8080
-AUTH_DIR=/data/.wwebjs_auth
-SUPABASE_URL=https://SEU-PROJETO.supabase.co
-SUPABASE_SERVICE_KEY=***SERVICE_ROLE***
-ALLOWED_ORIGINS=*
+// Status global
+app.get('/status', (req, res) => {
+  const tenants = {};
+  for (const [id] of tenantsMgr.clients) {
+    tenants[id] = { status: tenantsMgr.getStatus(id), hasQR: !!tenantsMgr.getQR(id) };
+  }
+  res.json({ ok: true, tenants, total: Object.keys(tenants).length });
+});
 
-# Railway → Settings
-# • Add Domain: api.orderzaps.com (e opcional wildcard via Cloudflare)
-# • Volumes: mount /data
-# • Deploy: Node >= 18
+// Status por tenant
+app.get('/status/:tenantId', (req, res) => {
+  const { tenantId } = req.params;
+  const status = tenantsMgr.getStatus(tenantId);
+  res.json({ ok: true, tenantId, status, hasQR: !!tenantsMgr.getQR(tenantId) });
+});
 
-Fluxo nova empresa (subdomínio):
-1) Inserir na tabela tenants: { id(uuid), name, slug: "empresaX", is_active: true }
-2) Acessar https://empresaX.orderzaps.com/connect (ou /qr para capturar o QR)
-3) Enviar mensagem: POST https://empresaX.orderzaps.com/send { message, number }
-*/
+// QR por tenant
+app.get('/qr/:tenantId', async (req, res) => {
+  const { tenantId } = req.params;
+  const qr = tenantsMgr.getQR(tenantId);
+  if (!qr) return res.status(404).json({ ok: false, error: 'QR não disponível (ainda não gerado ou sessão ativa)' });
+  res.json({ ok: true, tenantId, qr: qr.raw, qr_data_url: qr.dataUrl, updatedAt: qr.updatedAt });
+});
+
+// Reset por tenant
+app.post('/reset/:tenantId', async (req, res) => {
+  const { tenantId } = req.params;
+  try {
+    await tenantsMgr.resetTenant(tenantId);
+    // Recarrega dados do tenant no Supabase e reinicializa
+    const data = await Supabase.request(`/tenants?select=id,name,slug,is_active&id=eq.${tenantId}&limit=1`);
+    const tenant = data?.[0];
+    if (!tenant || tenant.is_active !== true) {
+      return res.status(404).json({ ok: false, error: 'Tenant inativo ou inexistente' });
+    }
+    await tenantsMgr.createClient(tenant);
+    res.json({ ok: true, tenantId, msg: 'Reset executado. Aguardando novo QR.' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'Erro no reset' });
+  }
+});
+
+// Normalização simples de telefone (Brasil)
+function normalizePhone(phone) {
+  if (!phone) return phone;
+  const clean = String(phone).replace(/\D/g, '');
+  const base = clean.startsWith('55') ? clean.slice(2) : clean;
+  let n = base;
+  if (n.length === 10) n = n.slice(0, 2) + '9' + n.slice(2);
+  return '55' + n;
+}
+
+// Envio de mensagem
+app.post('/send', async (req, res) => {
+  try {
+    const tenantId = req.headers['x-tenant-id'] || req.body?.tenant_id;
+    const { number, phone, message } = req.body || {};
+    if (!tenantId) return res.status(400).json({ ok: false, error: 'tenant_id obrigatório' });
+    if (!message) return res.status(400).json({ ok: false, error: 'message obrigatório' });
+
+    const cli = tenantsMgr.getClient(tenantId);
+    const status = tenantsMgr.getStatus(tenantId);
+    if (!cli || status !== 'online') {
+      return res.status(503).json({ ok: false, error: `WhatsApp offline para este tenant (status: ${status})` });
+    }
+    const dest = normalizePhone(number || phone);
+    await cli.sendMessage(`${dest}@c.us`, message);
+    res.json({ ok: true, tenantId, to: dest, sent: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'Erro ao enviar' });
+  }
+});
+
+// 404
+app.use((req, res) => res.status(404).json({ ok: false, error: 'Rota não encontrada' }));
+
+// Start server
+app.listen(CONFIG.PORT, () => {
+  console.log(`\n✅ API online em ${CONFIG.PUBLIC_BASE_URL || 'http://localhost:' + CONFIG.PORT}`);
+  console.log(`📂 AUTH_DIR: ${CONFIG.AUTH_DIR}`);
+  bootTenants().catch((e) => console.error('Erro ao carregar tenants:', e.message));
+});
