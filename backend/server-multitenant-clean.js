@@ -1,430 +1,296 @@
 /**
- * =========================================================
- * WhatsApp Multi-Tenant Server (Railway Ready)
- * =========================================================
- * - Chromium via PUPPETEER_EXECUTABLE_PATH (/usr/bin/chromium)
- * - Headless + flags linux
- * - Sessões persistentes em AUTH_DIR (/data/.wwebjs_auth)
- * - Endpoints: /health, /status, /status/:id, /qr/:id, /reset/:id, /send
- * ---------------------------------------------------------
- * Autor: OrderZaps
+ * server-multitenant-clean.js
+ * OrderZap – Backend WhatsApp (Multi-tenant) usando Baileys
+ *
+ * Rotas:
+ *  - GET  /health
+ *  - GET  /status/:tenantId   -> { ok, tenantId, status: 'booting|qr|connecting|ready|error', hasQR, error? }
+ *  - GET  /qr/:tenantId       -> { ok, qr } (dataURL) | { ok:false, error }
+ *  - POST /reset/:tenantId    -> apaga auth do tenant e reinicia (gera novo QR)
+ *  - POST /reconnect/:tenantId-> força reconexão mantendo auth
+ *
+ * ENV:
+ *  - PORT (default 8080)
+ *  - AUTH_DIR (default /data/webjs_auth)
+ *  - NODE_ENV, etc.
  */
 
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import pino from 'pino';
+import path from 'node:path';
+import fs from 'node:fs';
+import { Boom } from '@hapi/boom';
+import makeWASocket, {
+  Browsers,
+  useMultiFileAuthState,
+  DisconnectReason,
+} from '@whiskeysockets/baileys';
+import QRCode from 'qrcode';
 
-// Polyfill fetch para Node < 18 (Railway usa 18+ normalmente, mas deixo seguro)
-if (typeof fetch !== 'function') {
-  global.fetch = require('node-fetch');
+// -------------------- Config / Helpers --------------------
+
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
+const AUTH_DIR = process.env.AUTH_DIR || '/data/webjs_auth';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport:
+    process.env.NODE_ENV === 'production'
+      ? undefined
+      : { target: 'pino-pretty', options: { colorize: true } },
+});
+
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-/* ============================
-   CONFIG
-   ============================ */
-const CONFIG = {
-  PORT: Number(process.env.PORT || 8080),
-  SUPABASE_URL: process.env.SUPABASE_URL || '',
-  SUPABASE_KEY:
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_KEY ||
-    '',
-  PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL || '',
+ensureDir(AUTH_DIR);
 
-  // onde as sessões do wwebjs ficam salvas (MONTAR UM VOLUME EM /data NO RAILWAY)
-  AUTH_DIR: process.env.AUTH_DIR || path.join(process.cwd(), '.wwebjs_auth'),
+// Estado por tenant em memória
+const tenants = new Map();
+/**
+ * Estrutura do state:
+ * {
+ *   tenantId,
+ *   status: 'booting'|'qr'|'connecting'|'ready'|'error',
+ *   error: null|string,
+ *   hasQR: boolean,
+ *   lastQR: null|string(dataURL),
+ *   sock: WASocket|null,
+ *   stop: async()=>void,
+ * }
+ */
 
-  // chromium do sistema (instalado via NIXPACKS_PKGS)
-  PUPPETEER_EXECUTABLE_PATH:
-    process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+// -------------------- Tenants Manager --------------------
 
-  PUPPETEER_TIMEOUT: Number(process.env.PUPPETEER_TIMEOUT || 60000),
-};
+async function startTenant(tenantId) {
+  // Se já existe e está funcionando, só retorna
+  const existing = tenants.get(tenantId);
+  if (existing && existing.sock) return existing;
 
-/* ============================
-   SUPABASE HELPER
-   ============================ */
-class Supabase {
-  static async req(pathname, options = {}) {
-    if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_KEY) {
-      throw new Error('SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY não configurados');
-    }
-    const url = `${CONFIG.SUPABASE_URL}/rest/v1${pathname}`;
-    const headers = {
-      apikey: CONFIG.SUPABASE_KEY,
-      Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
-    const res = await fetch(url, { ...options, headers });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Supabase ${res.status}: ${text}`);
-    }
-    return res.json();
-  }
+  const tenantPath = path.join(AUTH_DIR, tenantId);
+  ensureDir(tenantPath);
 
-  static async loadActiveTenants() {
-    try {
-      const rows = await this.req(
-        '/tenants?select=id,name,slug,is_active&is_active=eq.true'
-      );
-      return rows || [];
-    } catch (e) {
-      console.error('❌ Supabase.loadActiveTenants:', e.message);
-      return [];
-    }
-  }
-
-  static async logMessage(tenant_id, phone, message, type, metadata = {}) {
-    try {
-      await this.req('/whatsapp_messages', {
-        method: 'POST',
-        body: JSON.stringify({
-          tenant_id,
-          phone,
-          message,
-          type,
-          sent_at: type === 'outgoing' ? new Date().toISOString() : null,
-          received_at: type === 'incoming' ? new Date().toISOString() : null,
-          ...metadata,
-        }),
-      });
-    } catch (e) {
-      console.warn('⚠️ Falha ao logar mensagem no Supabase:', e.message);
-    }
-  }
-}
-
-/* ============================
-   UTILS
-   ============================ */
-function ensureDir(p) {
-  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
-}
-
-function normalizePhoneBR(phone) {
-  if (!phone) return phone;
-  const clean = String(phone).replace(/\D/g, '');
-  const withoutDDI = clean.startsWith('55') ? clean.slice(2) : clean;
-
-  let n = withoutDDI;
-  if (n.length === 10) {
-    // acrescenta 9º dígito em celulares (aproximação segura)
-    n = n.slice(0, 2) + '9' + n.slice(2);
-  }
-  return `55${n}`;
-}
-
-/* ============================
-   TENANT MANAGER
-   ============================ */
-class TenantManager {
-  constructor() {
-    /** @type {Map<string, import('whatsapp-web.js').Client>} */
-    this.clients = new Map();
-    /** @type {Map<string, string>} */
-    this.status = new Map(); // offline | initializing | qr_code | authenticated | online | error | auth_failure
-    /** @type {Map<string, string>} */
-    this.qrCache = new Map(); // tenantId -> dataURL do QR (atual)
-    /** @type {Map<string, string>} */
-    this.authDirs = new Map();
-  }
-
-  _tenantAuthDir(tenantId) {
-    const dir = path.join(CONFIG.AUTH_DIR, `tenant_${tenantId}`);
-    ensureDir(CONFIG.AUTH_DIR);
-    ensureDir(dir);
-    this.authDirs.set(tenantId, dir);
-    return dir;
-  }
-
-  /**
-   * Cria/Inicializa cliente de um tenant
-   */
-  async createClient(tenant) {
-    const tenantId = tenant.id;
-    const name = tenant.name || tenant.slug || tenantId;
-    const authDir = this._tenantAuthDir(tenantId);
-
-    console.log(
-      `\n================= INIT TENANT =================\n` +
-        `🧩 Tenant: ${name}\n` +
-        `🆔 ID: ${tenantId}\n` +
-        `📁 AuthDir: ${authDir}\n` +
-        `==============================================\n`
-    );
-
-    const exe = CONFIG.PUPPETEER_EXECUTABLE_PATH || undefined;
-    const client = new Client({
-      authStrategy: new LocalAuth({
-        clientId: `tenant_${tenantId}`,
-        dataPath: authDir,
-      }),
-      puppeteer: {
-        executablePath: exe, // chromium do sistema
-        headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--disable-gpu',
-          '--disable-software-rasterizer',
-        ],
-        timeout: CONFIG.PUPPETEER_TIMEOUT,
-      },
-      qrMaxRetries: 10,
-    });
-
-    /* -------- Eventos -------- */
-    client.on('qr', async (qr) => {
-      // Gerar dataURL para o frontend (qrcode lib opcional)
+  // Cria/atualiza estrutura base
+  const state = {
+    tenantId,
+    status: 'booting',
+    error: null,
+    hasQR: false,
+    lastQR: null,
+    sock: null,
+    stop: async () => {
       try {
-        const qrcode = require('qrcode');
-        const dataUrl = await qrcode.toDataURL(qr, { margin: 1, scale: 6 });
-        this.qrCache.set(tenantId, dataUrl);
-        this.status.set(tenantId, 'qr_code');
-        console.log(`📱 [${name}] QR gerado`);
-      } catch (err) {
-        console.warn(`⚠️ [${name}] Falha ao gerar dataURL do QR:`, err.message);
-        this.qrCache.set(tenantId, '');
-        this.status.set(tenantId, 'qr_code');
+        if (state.sock) {
+          await state.sock?.logout?.().catch(() => {});
+          try {
+            // fecha conexão com cuidado
+            state.sock?.ws?.close?.();
+          } catch {}
+        }
+      } catch (e) {
+        logger.warn({ tenantId, err: (e && e.message) || e }, '[stop] error');
+      } finally {
+        state.sock = null;
       }
-    });
+    },
+  };
 
-    client.on('loading_screen', (p) => {
-      console.log(`⏳ [${name}] carregando ${p}%`);
-    });
+  tenants.set(tenantId, state);
 
-    client.on('authenticated', () => {
-      this.status.set(tenantId, 'authenticated');
-      // ao autenticar apaga QR cache
-      this.qrCache.delete(tenantId);
-      console.log(`🔐 [${name}] autenticado`);
-    });
+  // Baileys Auth multi-file
+  const { state: authState, saveCreds } = await useMultiFileAuthState(tenantPath);
 
-    client.on('ready', () => {
-      this.status.set(tenantId, 'online');
-      this.qrCache.delete(tenantId);
-      console.log(`✅✅✅ [${name}] CONECTADO ✅✅✅`);
-    });
+  // Cria o socket
+  const sock = makeWASocket({
+    logger,
+    // Fake browser para reduzir ban/triggers
+    browser: Browsers.appropriate('Chrome'),
+    printQRInTerminal: false,
+    auth: authState,
+    syncFullHistory: false,
+    markOnlineOnConnect: false,
+    // reconnection handled by on('connection.update')
+  });
 
-    client.on('auth_failure', (msg) => {
-      this.status.set(tenantId, 'auth_failure');
-      console.error(`❌ [${name}] Falha de auth:`, msg);
-    });
+  state.sock = sock;
+  state.status = 'connecting';
 
-    client.on('disconnected', (reason) => {
-      this.status.set(tenantId, 'offline');
-      this.qrCache.delete(tenantId);
-      console.warn(`🔌 [${name}] desconectado: ${reason}`);
-    });
+  // Eventos
+  sock.ev.on('creds.update', saveCreds);
 
-    /* -------- Inicialização -------- */
-    try {
-      this.status.set(tenantId, 'initializing');
-      await client.initialize();
-      this.clients.set(tenantId, client);
-      return client;
-    } catch (err) {
-      this.status.set(tenantId, 'error');
-      console.error(`💥 [${name}] erro ao iniciar:`, err.message);
-      // dica de libs ausentes
-      console.error(
-        'TROUBLESHOOTING: verifique instalação do Chromium e libs: libasound2, libatk-bridge2.0-0, libatk1.0-0, libcairo2, libcups2, libdbus-1-3, libexpat1, libfontconfig1, libgbm1, libglib2.0-0, libgtk-3-0, libnspr4, libnss3, libpango-1.0-0, libx11-6, libxcb1, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxkbcommon0, libxrandr2, xdg-utils.'
-      );
-      return null;
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      try {
+        state.lastQR = await QRCode.toDataURL(qr, { margin: 1, width: 300 });
+        state.hasQR = true;
+        state.status = 'qr';
+        state.error = null;
+        logger.info({ tenantId }, 'QR atualizado');
+      } catch (e) {
+        state.status = 'error';
+        state.error = 'Falha ao gerar QR';
+        logger.error({ tenantId, err: e?.message || e }, 'Erro QRCode');
+      }
     }
-  }
 
-  getClient(tenantId) {
-    return this.clients.get(tenantId) || null;
-  }
+    if (connection === 'open') {
+      state.status = 'ready';
+      state.hasQR = false;
+      state.error = null;
+      logger.info({ tenantId }, 'Conectado (ready)');
+    } else if (connection === 'close') {
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      logger.warn({ tenantId, reason }, 'Conexão fechada');
 
-  getStatus(tenantId) {
-    return this.status.get(tenantId) || 'not_found';
-  }
-
-  getAllStatus() {
-    const out = {};
-    for (const [id] of this.clients) {
-      out[id] = {
-        status: this.getStatus(id),
-        hasClient: true,
-        hasQR: this.qrCache.has(id),
-      };
-    }
-    return out;
-  }
-
-  getQR(tenantId) {
-    return this.qrCache.get(tenantId) || '';
-  }
-
-  async reset(tenantId) {
-    const client = this.getClient(tenantId);
-    try {
-      if (client) {
+      // Trata motivos comuns
+      if (reason === DisconnectReason.loggedOut) {
+        // sessão inválida — precisa resetar
+        state.status = 'error';
+        state.error = 'logged_out';
+        state.hasQR = false;
+        state.sock = null;
+      } else {
+        // tenta reconectar automaticamente
+        state.status = 'connecting';
         try {
-          await client.destroy();
-        } catch (e) {}
-        this.clients.delete(tenantId);
+          await startTenant(tenantId);
+        } catch (e) {
+          state.status = 'error';
+          state.error = 'reconnect_failed';
+          logger.error({ tenantId, err: e?.message || e }, 'Falha ao reconectar');
+        }
       }
-      this.qrCache.delete(tenantId);
-      this.status.set(tenantId, 'initializing');
-
-      // apaga diretório de sessão
-      const authDir = this.authDirs.get(tenantId) || this._tenantAuthDir(tenantId);
-      try {
-        fs.rmSync(authDir, { recursive: true, force: true });
-      } catch (_) {}
-      ensureDir(authDir);
-
-      return true;
-    } catch (e) {
-      console.error('reset error:', e.message);
-      return false;
     }
-  }
+  });
+
+  return state;
 }
 
-/* ============================
-   EXPRESS APP
-   ============================ */
-async function createApp() {
-  const app = express();
-  app.use(cors());
-  app.use(express.json({ limit: '10mb' }));
+async function resetTenant(tenantId) {
+  // apaga a pasta e reinicia
+  const tenantPath = path.join(AUTH_DIR, tenantId);
 
-  const manager = new TenantManager();
-
-  // carrega tenants e inicia clientes
-  console.log('🔎 Carregando tenants ativos do Supabase...');
-  const tenants = await Supabase.loadActiveTenants();
-  console.log(`➡️ Encontrados ${tenants.length} tenant(s)`);
-
-  for (const t of tenants) {
-    await manager.createClient(t);
+  // para conexão atual
+  const st = tenants.get(tenantId);
+  if (st) {
+    try {
+      await st.stop();
+    } catch {}
+    tenants.delete(tenantId);
   }
 
-  // --------- ROTAS ---------
-  app.get('/health', (req, res) => {
+  // remove auth
+  try {
+    if (fs.existsSync(tenantPath)) {
+      fs.rmSync(tenantPath, { recursive: true, force: true });
+    }
+  } catch (e) {
+    logger.warn({ tenantId, err: e?.message || e }, 'Erro removendo auth');
+  }
+
+  // volta a subir do zero (gera novo QR)
+  return startTenant(tenantId);
+}
+
+async function reconnectTenant(tenantId) {
+  const st = tenants.get(tenantId);
+  if (!st) return startTenant(tenantId);
+
+  try {
+    await st.stop();
+  } catch {}
+  tenants.delete(tenantId);
+  return startTenant(tenantId);
+}
+
+// -------------------- HTTP Server --------------------
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.get('/health', (req, res) => {
+  res.json({ ok: true, uptime: process.uptime(), tenants: tenants.size });
+});
+
+app.get('/status/:tenantId', async (req, res) => {
+  const { tenantId } = req.params;
+  try {
+    const st = await startTenant(tenantId);
     res.json({
       ok: true,
-      status: 'online',
-      ts: new Date().toISOString(),
-      port: CONFIG.PORT,
-      publicBaseUrl: CONFIG.PUBLIC_BASE_URL || null,
-    });
-  });
-
-  app.get('/status', (req, res) => {
-    res.json({ ok: true, tenants: manager.getAllStatus() });
-  });
-
-  app.get('/status/:tenantId', (req, res) => {
-    const { tenantId } = req.params;
-    const st = manager.getStatus(tenantId);
-    res.json({ ok: true, tenantId, status: st, hasQR: !!manager.getQR(tenantId) });
-  });
-
-  app.get('/qr/:tenantId', (req, res) => {
-    const { tenantId } = req.params;
-    const st = manager.getStatus(tenantId);
-    if (st === 'qr_code') {
-      const dataUrl = manager.getQR(tenantId);
-      if (dataUrl) return res.json({ ok: true, tenantId, qr_data_url: dataUrl });
-    }
-    return res
-      .status(404)
-      .json({ ok: false, error: 'QR não disponível (ainda não gerado ou sessão ativa)' });
-  });
-
-  app.post('/reset/:tenantId', async (req, res) => {
-    const { tenantId } = req.params;
-    const ok = await manager.reset(tenantId);
-
-    // Recria o cliente imediatamente (gera novo QR em seguida)
-    const tenantsList = await Supabase.loadActiveTenants();
-    const t = tenantsList.find((x) => x.id === tenantId);
-    if (!t) {
-      return res.status(404).json({ ok: false, error: 'Tenant não encontrado no banco' });
-    }
-    await manager.createClient(t);
-
-    return res.json({ ok, tenantId });
-  });
-
-  app.post('/send', async (req, res) => {
-    try {
-      const { tenant_id, number, phone, message } = req.body || {};
-      const tenantId =
-        req.headers['x-tenant-id'] ||
-        req.headers['X-Tenant-Id'] ||
-        tenant_id;
-
-      if (!tenantId) {
-        return res.status(400).json({ ok: false, error: 'tenant_id obrigatorio' });
-      }
-      if (!message) {
-        return res.status(400).json({ ok: false, error: 'message obrigatoria' });
-      }
-      const phoneRaw = number || phone;
-      if (!phoneRaw) {
-        return res.status(400).json({ ok: false, error: 'phone/number obrigatorio' });
-      }
-
-      const client = manager.getClient(tenantId);
-      const st = manager.getStatus(tenantId);
-
-      if (!client || !['online', 'authenticated'].includes(st)) {
-        return res.status(503).json({
-          ok: false,
-          error: 'WhatsApp não está conectado para este tenant',
-          status: st,
-        });
-      }
-
-      const normalized = normalizePhoneBR(phoneRaw);
-      await client.sendMessage(`${normalized}@c.us`, message);
-
-      Supabase.logMessage(tenantId, normalized, message, 'outgoing').catch(() => {});
-      return res.json({ ok: true, sent: true, to: normalized, tenantId });
-    } catch (e) {
-      console.error('❌ /send error:', e.message);
-      return res.status(500).json({ ok: false, error: e.message });
-    }
-  });
-
-  // 404
-  app.use((req, res) => res.status(404).json({ ok: false, error: 'Rota não encontrada' }));
-
-  return { app, manager };
-}
-
-/* ============================
-   BOOT
-   ============================ */
-(async () => {
-  try {
-    ensureDir(CONFIG.AUTH_DIR);
-
-    const { app } = await createApp();
-    app.listen(CONFIG.PORT, () => {
-      console.log('\n==================================================');
-      console.log('✅ API online em:', `http://localhost:${CONFIG.PORT}`);
-      if (CONFIG.PUBLIC_BASE_URL) console.log('🌐 PUBLIC_BASE_URL:', CONFIG.PUBLIC_BASE_URL);
-      console.log('📁 AUTH_DIR:', CONFIG.AUTH_DIR);
-      console.log('🧭 Rotas: /health, /status, /status/:id, /qr/:id, /reset/:id, /send');
-      console.log('==================================================\n');
+      tenantId,
+      status: st.status,
+      hasQR: !!st.hasQR,
+      error: st.error || null,
     });
   } catch (e) {
-    console.error('❌ Erro fatal de inicialização:', e);
-    process.exit(1);
+    logger.error({ tenantId, err: e?.message || e }, 'status error');
+    res.status(500).json({ ok: false, tenantId, error: 'status_failed' });
   }
-})();
+});
+
+app.get('/qr/:tenantId', async (req, res) => {
+  const { tenantId } = req.params;
+  try {
+    const st = await startTenant(tenantId);
+    // Se já está conectado, não há QR
+    if (st.status === 'ready') {
+      return res.json({ ok: false, error: 'Sessão ativa (sem QR)' });
+    }
+    if (st.hasQR && st.lastQR) {
+      return res.json({ ok: true, qr: st.lastQR });
+    }
+    return res.json({
+      ok: false,
+      error: 'QR não disponível (ainda não gerado ou sessão ativa)',
+    });
+  } catch (e) {
+    logger.error({ tenantId, err: e?.message || e }, 'qr error');
+    res.status(500).json({ ok: false, error: 'qr_failed' });
+  }
+});
+
+app.post('/reset/:tenantId', async (req, res) => {
+  const { tenantId } = req.params;
+  try {
+    await resetTenant(tenantId);
+    res.json({ ok: true, tenantId, message: 'Sessão resetada. Gere/veja o novo QR.' });
+  } catch (e) {
+    logger.error({ tenantId, err: e?.message || e }, 'reset error');
+    res.status(500).json({ ok: false, error: 'reset_failed' });
+  }
+});
+
+app.post('/reconnect/:tenantId', async (req, res) => {
+  const { tenantId } = req.params;
+  try {
+    await reconnectTenant(tenantId);
+    res.json({ ok: true, tenantId, message: 'Reconectando...' });
+  } catch (e) {
+    logger.error({ tenantId, err: e?.message || e }, 'reconnect error');
+    res.status(500).json({ ok: false, error: 'reconnect_failed' });
+  }
+});
+
+// Rota opcional para listar tenants ativos em memória
+app.get('/tenants', (_req, res) => {
+  const list = Array.from(tenants.values()).map((t) => ({
+    tenantId: t.tenantId,
+    status: t.status,
+    hasQR: t.hasQR,
+    error: t.error || null,
+  }));
+  res.json({ ok: true, tenants: list });
+});
+
+// -------------------- Start --------------------
+
+app.listen(PORT, () => {
+  logger.info({ PORT, AUTH_DIR }, 'API online');
+});
