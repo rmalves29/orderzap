@@ -1,12 +1,9 @@
-# Ver o status
-git status
+FROM nginx:alpine
 
-# Adicionar o Dockerfile do frontend
-git add frontend/Dockerfile
+WORKDIR /usr/share/nginx/html
 
-# Se quiser MESMO apagar o pnpm-lock.yaml agora, você pode:
-# rm pnpm-lock.yaml
-# git add pnpm-lock.yaml
+COPY . .
 
-# Commit
-git commit -m "chore: add static Dockerfile for frontend"
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
