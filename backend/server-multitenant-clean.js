@@ -1,202 +1,221 @@
-// backend/server-multitenant-clean.js
-/**
- * OrderZap – Backend Multi-Tenant (limpo e verboso)
- * - Mantém nome do arquivo: server-multitenant-clean.js
- * - Rotas:
- *    GET /status/:tenantId
- *    GET /qr/:tenantId
- *    POST /reset/:tenantId
- * - Usa fila por tenant para evitar corrida
- * - Usa PUPPETEER_EXECUTABLE_PATH (Chromium do sistema, via Nixpacks)
- */
+// server-multitenant-clean.js
+// API WhatsApp multi-tenant — Railway
+// Dep: express, cors, whatsapp-web.js, qrcode, fs-extra, path, dotenv (opcional)
 
 const express = require('express');
 const cors = require('cors');
-const fetch = require('node-fetch');
-const { createClient } = require('@supabase/supabase-js');
-const { v4: uuid } = require('uuid');
-const http = require('http');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const QRCode = require('qrcode');
+const fs = require('fs-extra');
+const path = require('path');
 
-// ====== CONFIG BÁSICA ======
-const PORT = process.env.PORT || 8080;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+require('dotenv').config();
 
-// Chromium (instalado via apt no Nixpacks)
-const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
-
-// ====== APP ======
 const app = express();
-app.use(cors());
 app.use(express.json());
 
-// ====== SUPABASE ======
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error('[BOOT] Variáveis do Supabase ausentes.');
-  process.exit(1);
-}
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// ===== CORS =====
+const APP_ORIGIN = process.env.APP_ORIGIN || '*';
+app.use(
+  cors({
+    origin: (origin, cb) => cb(null, true), // se quiser travar, troque para [APP_ORIGIN]
+    credentials: true,
+  })
+);
 
-// ====== ESTADO EM MEMÓRIA ======
+// ===== Config =====
+const PORT = process.env.PORT || 8080;
+const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'wwebjs_auth');
+const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/chromium';
+
+fs.ensureDirSync(AUTH_DIR);
+
+// ===== Estado em memória =====
 /**
- * tenantsState[tenantId] = {
- *   status: 'idle' | 'generating' | 'ready' | 'error',
- *   hasQR: boolean,
- *   lastError: string|undefined,
- *   queue: Promise<void> (cadeia de promessas pra serializar tarefas),
- *   sessionId: string | null
+ * clients[tenantId] = {
+ *   client,
+ *   status: 'starting' | 'qr' | 'ready' | 'auth_failure' | 'disconnected' | 'error',
+ *   qr: 'data:image/png;base64,...' | null,
  * }
  */
-const tenantsState = new Map();
+const clients = Object.create(null);
 
-function ensureTenant(tenantId) {
-  if (!tenantsState.has(tenantId)) {
-    tenantsState.set(tenantId, {
-      status: 'idle',
-      hasQR: false,
-      lastError: undefined,
-      queue: Promise.resolve(),
-      sessionId: null,
-    });
-  }
-  return tenantsState.get(tenantId);
-}
+// ===== Helpers =====
 
-function enqueue(tenantId, task) {
-  const state = ensureTenant(tenantId);
-  state.queue = state.queue.then(task).catch((err) => {
-    // Captura qualquer erro não tratado dentro da tarefa
-    console.error(`[${tenantId}] Erro na fila:`, err);
-  });
-  return state.queue;
-}
+// cria (ou retorna) um client de um tenant
+async function ensureClient(tenantId) {
+  if (clients[tenantId]?.client) return clients[tenantId];
 
-// ====== HELPERS ======
-async function getTenantRow(tenantId) {
-  const { data, error } = await supabase
-    .from('tenants')
-    .select('*')
-    .eq('id', tenantId)
-    .single();
+  const sessionDir = path.join(AUTH_DIR, tenantId);
+  fs.ensureDirSync(sessionDir);
 
-  if (error) throw new Error(`Supabase: ${error.message}`);
-  if (!data) throw new Error('Tenant não encontrado');
-  return data;
-}
+  const puppeteerArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--no-zygote',
+    '--single-process',
+  ];
 
-async function saveSessionStatus(tenantId, payload) {
-  await supabase.from('wa_sessions').upsert({
-    tenant_id: tenantId,
-    ...payload,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: 'tenant_id' });
-}
-
-function log(tenantId, ...args) {
-  console.log(`[${new Date().toISOString()}][${tenantId}]`, ...args);
-}
-
-// ====== FAKE GERADOR DE QR (substitua pelo seu launch real) ======
-/**
- * Aqui deveria entrar seu código de integração com Baileys/whatsapp-web.js.
- * Para fins de infraestrutura, simulamos o ciclo: gerar QR -> fica "ready".
- */
-async function launchWhatsappForTenant(tenantId, options = {}) {
-  const state = ensureTenant(tenantId);
-
-  // Se já existe sessão ativa, apenas confirma status.
-  if (state.status === 'ready') {
-    log(tenantId, 'Sessão já ativa, não relaunch.');
-    return;
-  }
-
-  state.status = 'generating';
-  state.hasQR = false;
-  state.lastError = undefined;
-
-  log(tenantId, 'Iniciando geração de QR...');
-  // Simula tempo para “baixar/abrir” Chromium e preparar a sessão
-  await new Promise((r) => setTimeout(r, 3000));
-
-  // Simula sucesso de QR
-  state.hasQR = true;
-  state.status = 'ready';
-  state.sessionId = uuid();
-
-  await saveSessionStatus(tenantId, {
-    status: state.status,
-    has_qr: state.hasQR,
-    session_id: state.sessionId,
+  const client = new Client({
+    authStrategy: new LocalAuth({
+      clientId: tenantId,
+      dataPath: AUTH_DIR,
+    }),
+    puppeteer: {
+      executablePath: CHROME_PATH, // instalado via NIXPACKS_APT_PKGS
+      args: puppeteerArgs,
+      headless: true,
+    },
   });
 
-  log(tenantId, 'QR pronto. Sessão marcada como ready.');
+  clients[tenantId] = {
+    client,
+    status: 'starting',
+    qr: null,
+  };
+
+  // Eventos
+  client.on('qr', async (qr) => {
+    try {
+      const dataUrl = await QRCode.toDataURL(qr, { margin: 1 });
+      clients[tenantId].qr = dataUrl;
+      clients[tenantId].status = 'qr';
+      console.log(`[${tenantId}] QR gerado`);
+    } catch (e) {
+      console.error(`[${tenantId}] Falha ao gerar QR:`, e);
+    }
+  });
+
+  client.on('ready', () => {
+    clients[tenantId].status = 'ready';
+    clients[tenantId].qr = null;
+    console.log(`[${tenantId}] WhatsApp pronto`);
+  });
+
+  client.on('authenticated', () => {
+    console.log(`[${tenantId}] Autenticado`);
+  });
+
+  client.on('auth_failure', (msg) => {
+    clients[tenantId].status = 'auth_failure';
+    console.error(`[${tenantId}] Falha de auth: ${msg}`);
+  });
+
+  client.on('disconnected', (reason) => {
+    clients[tenantId].status = 'disconnected';
+    console.warn(`[${tenantId}] Desconectado: ${reason}`);
+  });
+
+  client.on('change_state', (state) => {
+    console.log(`[${tenantId}] Estado: ${state}`);
+  });
+
+  // Inicializa
+  try {
+    await client.initialize();
+  } catch (e) {
+    clients[tenantId].status = 'error';
+    console.error(`[${tenantId}] Erro ao inicializar client:`, e);
+  }
+
+  return clients[tenantId];
 }
 
-// ====== ROTAS ======
+// derruba e apaga a sessão do tenant
+async function resetTenant(tenantId) {
+  const current = clients[tenantId];
+  try {
+    if (current?.client) {
+      try {
+        await current.client.destroy();
+      } catch (_) {}
+    }
+  } catch (_) {}
 
-// Health
+  // remove pasta LocalAuth
+  const sessionFolder = path.join(AUTH_DIR, tenantId);
+  try {
+    await fs.remove(sessionFolder);
+  } catch (e) {
+    console.warn(`[${tenantId}] Não conseguiu remover sessão:`, e.message);
+  }
+
+  delete clients[tenantId];
+  console.log(`[${tenantId}] Sessão resetada`);
+}
+
+// ===== Rotas =====
 app.get('/', (_req, res) => {
-  res.json({ ok: true, name: 'orderzaps-backend', time: new Date().toISOString() });
+  res.json({ ok: true, ts: Date.now() });
 });
 
-// Status do tenant
+// status do tenant
 app.get('/status/:tenantId', async (req, res) => {
   const { tenantId } = req.params;
-  ensureTenant(tenantId);
-  const { status, hasQR } = tenantsState.get(tenantId);
-  res.json({ ok: true, tenantId, status, hasQR });
+  try {
+    const entry = await ensureClient(tenantId);
+    res.json({
+      ok: true,
+      tenantId,
+      status: entry.status,
+      hasQR: Boolean(entry.qr),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'erro status' });
+  }
 });
 
-// Força gerar/obter QR
+// último QR em cache (se existir)
 app.get('/qr/:tenantId', async (req, res) => {
   const { tenantId } = req.params;
-
   try {
-    // Garante que o tenant existe no banco (falha rápido se não existir)
-    await getTenantRow(tenantId);
-  } catch (err) {
-    return res.status(404).json({ ok: false, error: String(err.message || err) });
-  }
-
-  // Serializa a geração para este tenant
-  enqueue(tenantId, async () => {
-    const state = ensureTenant(tenantId);
-    if (state.status === 'generating') {
-      log(tenantId, 'Já está gerando QR; não duplicar.');
-      return;
+    const entry = await ensureClient(tenantId);
+    if (entry.qr) {
+      // retorna como DataURL (front exibe diretamente)
+      res.json({ ok: true, tenantId, qr: entry.qr });
+    } else {
+      res.json({ ok: false, error: 'QR não disponível (ainda não gerado ou sessão ativa)' });
     }
-    await launchWhatsappForTenant(tenantId, { executablePath: PUPPETEER_EXECUTABLE_PATH });
-  });
-
-  res.json({ ok: true, message: 'Geração de QR iniciada (se necessário). Consulte /status/:tenantId.' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'erro qr' });
+  }
 });
 
-// Reset de sessão (limpa e força novo QR no próximo /qr)
+// força reconexão (não apaga sessão)
+app.post('/reconnect/:tenantId', async (req, res) => {
+  const { tenantId } = req.params;
+  try {
+    const entry = clients[tenantId];
+    if (entry?.client) {
+      try {
+        await entry.client.destroy();
+      } catch (_) {}
+      delete clients[tenantId];
+    }
+    const created = await ensureClient(tenantId);
+    res.json({ ok: true, tenantId, status: created.status });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'erro reconnect' });
+  }
+});
+
+// RESET total: apaga sessão + re-inicializa (gera novo QR do zero)
 app.post('/reset/:tenantId', async (req, res) => {
   const { tenantId } = req.params;
-  const state = ensureTenant(tenantId);
-
-  enqueue(tenantId, async () => {
-    state.status = 'idle';
-    state.hasQR = false;
-    state.sessionId = null;
-    state.lastError = undefined;
-
-    await saveSessionStatus(tenantId, {
-      status: state.status,
-      has_qr: state.hasQR,
-      session_id: null,
-    });
-
-    log(tenantId, 'Sessão resetada; próximo /qr irá gerar novo QR.');
-  });
-
-  res.json({ ok: true, message: 'Sessão será resetada.' });
+  try {
+    await resetTenant(tenantId);
+    const created = await ensureClient(tenantId);
+    res.json({ ok: true, tenantId, status: created.status });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'erro reset' });
+  }
 });
 
-// ====== BOOT ======
-const server = http.createServer(app);
-server.listen(PORT, () => {
-  console.log(`[BOOT] API online em http://0.0.0.0:${PORT}`);
-  console.log(`[BOOT] ExecutablePath do Chromium: ${PUPPETEER_EXECUTABLE_PATH}`);
+// ===== Start =====
+app.listen(PORT, () => {
+  console.log(`API online em :${PORT}`);
+  console.log(`Auth dir: ${AUTH_DIR}`);
+  console.log(`Chromium: ${CHROME_PATH}`);
 });
