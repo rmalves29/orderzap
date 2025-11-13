@@ -26,7 +26,15 @@ app.use(
 // ===== Config =====
 const PORT = process.env.PORT || 8080;
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'wwebjs_auth');
-const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/chromium';
+
+// Prioridade:
+// 1) PUPPETEER_EXECUTABLE_PATH (recomendado pela Railway)
+// 2) CHROME_PATH (compatibilidade antiga)
+// 3) caminho padrão do Chromium no container
+const PUPPETEER_EXECUTABLE_PATH =
+  process.env.PUPPETEER_EXECUTABLE_PATH ||
+  process.env.CHROME_PATH ||
+  '/usr/bin/chromium-browser';
 
 fs.ensureDirSync(AUTH_DIR);
 
@@ -49,6 +57,8 @@ async function ensureClient(tenantId) {
   const sessionDir = path.join(AUTH_DIR, tenantId);
   fs.ensureDirSync(sessionDir);
 
+  // Mesmo efeito do exemplo:
+  // args: ['--no-sandbox', '--disable-setuid-sandbox', ...]
   const puppeteerArgs = [
     '--no-sandbox',
     '--disable-setuid-sandbox',
@@ -64,9 +74,10 @@ async function ensureClient(tenantId) {
       dataPath: AUTH_DIR,
     }),
     puppeteer: {
-      executablePath: CHROME_PATH, // instalado via NIXPACKS_APT_PKGS
-      args: puppeteerArgs,
+      // equivalente a executablePath: process.env.PUPPETEER_EXECUTABLE_PATH
+      executablePath: PUPPETEER_EXECUTABLE_PATH,
       headless: true,
+      args: puppeteerArgs,
     },
   });
 
@@ -217,5 +228,5 @@ app.post('/reset/:tenantId', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`API online em :${PORT}`);
   console.log(`Auth dir: ${AUTH_DIR}`);
-  console.log(`Chromium: ${CHROME_PATH}`);
+  console.log(`Chromium: ${PUPPETEER_EXECUTABLE_PATH}`);
 });
