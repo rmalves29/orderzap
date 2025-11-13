@@ -1,18 +1,19 @@
 {
-  "name": "orderzaps-backend",
+  "name": "orderzap-backend",
+  "version": "1.0.0",
+  "main": "server-multitenant-clean.js",
   "type": "module",
   "scripts": {
-    "start": "node server-multitenant-clean.js",
-    "dev": "nodemon server-multitenant-clean.js"
-    "build": "pnpm run build",
-    "start": "pnpm run start"
+    "start": "node server-multitenant-clean.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.20",
-    "express": "^4.19.2",
-    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
     "cors": "^2.8.5",
-    "pino": "^8.0.0",
-    "puppeteer-core": "^22.10.0"
+    "whatsapp-web.js": "^1.21.0",
+    "puppeteer-core": "^22.5.0",
+    "qrcode": "^1.5.3",
+    "axios": "^1.6.7",
+    "dotenv": "^16.4.0",
+    "supabase-js": "^2.39.1"
   }
 }
