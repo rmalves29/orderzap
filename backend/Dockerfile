@@ -1,23 +1,32 @@
-# Imagem base com Node + Chromium
-FROM ghcr.io/puppeteer/puppeteer:latest
+FROM node:18-slim
 
-# Define diretório de trabalho
+RUN apt-get update && apt-get install -y \
+    chromium \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libxkbcommon0 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    xdg-utils \
+    wget \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copia o package.json
-COPY package.json .
-
-# Instala dependências com npm
+COPY package.json ./
 RUN npm install
 
-# Copia todo o restante do código
 COPY . .
 
-# Porta exposta (opcional)
-EXPOSE 3000
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
-# Variável obrigatória para Puppeteer
-ENV PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium-browser"
-
-# Inicia o servidor
 CMD ["node", "server-multitenant-clean.js"]
