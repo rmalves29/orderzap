@@ -1,24 +1,23 @@
-# /frontend/Dockerfile
+# Imagem base
+FROM node:20-alpine
 
-# ---------- Build ---------- #
-FROM node:20-bookworm AS build
-WORKDIR /app/frontend
+# Define diretório de trabalho
+WORKDIR /app
 
-# PNPM
-RUN corepack enable && corepack prepare pnpm@9.12.2 --activate
+# Copia arquivos de configuração
+COPY package*.json ./
 
-# Instala dependências com lockfile travado
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+# Instala dependências
+RUN npm ci
 
-# Copia o restante do frontend e gera build
-COPY frontend/ .
-RUN pnpm build
+# Copia o restante do projeto
+COPY . .
 
-# ---------- Runtime (Nginx) ---------- #
-FROM nginx:1.25-alpine
-# Copia o build para o Nginx
-COPY --from=build /app/frontend/dist/ /usr/share/nginx/html
-# Opcional: cache/brotli/gzip podem ser configurados via nginx.conf
+# Builda o projeto
+RUN npm run build
+
+# Usa Caddy como servidor de produção
+RUN npm install -g caddy
+
 EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["npx", "caddy", "run", "--config", "Caddyfile", "--adapter", "caddyfile"]
