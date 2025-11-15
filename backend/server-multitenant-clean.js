@@ -2,14 +2,21 @@
 // API WhatsApp multi-tenant — Railway
 // Dep: express, cors, whatsapp-web.js, qrcode, fs-extra, path, dotenv (opcional)
 
-const express = require('express');
-const cors = require('cors');
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const QRCode = require('qrcode');
-const fs = require('fs-extra');
-const path = require('path');
+import express from 'express';
+import cors from 'cors';
+import whatsappWeb from 'whatsapp-web.js';
+import QRCode from 'qrcode';
+import fs from 'fs-extra';
+import path from 'path';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
 
-require('dotenv').config();
+const { Client, LocalAuth } = whatsappWeb;
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
@@ -50,32 +57,62 @@ const chromiumSystemCandidates = [
   '/app/.cache/ms-playwright/chromium/chrome-linux/chrome',
 ];
 
-function collectBundledChromium() {
-  const bundled = [];
-  const puppeteerBase = path.join(__dirname, 'node_modules', 'puppeteer', '.local-chromium');
-  if (!fs.existsSync(puppeteerBase)) {
-    return bundled;
+function collectExecutablesUnder(baseDir) {
+  const found = [];
+  if (!fs.existsSync(baseDir)) {
+    return found;
   }
 
-  for (const platformDir of fs.readdirSync(puppeteerBase)) {
-    const chromiumDir = path.join(puppeteerBase, platformDir);
+  for (const entry of fs.readdirSync(baseDir)) {
+    const candidateDir = path.join(baseDir, entry);
+    let stats;
     try {
-      if (!fs.statSync(chromiumDir).isDirectory()) continue;
+      stats = fs.lstatSync(candidateDir);
     } catch (err) {
       continue;
     }
 
-    const chromeCandidates = [
-      path.join(chromiumDir, 'chrome-linux', 'chrome'),
-      path.join(chromiumDir, 'chrome-win', 'chrome.exe'),
-      path.join(chromiumDir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
-    ];
-
-    for (const candidate of chromeCandidates) {
-      if (fs.existsSync(candidate)) {
-        bundled.push(candidate);
-      }
+    if (stats.isSymbolicLink()) {
+      continue;
     }
+
+    if (stats.isDirectory()) {
+      const nestedCandidates = [
+        path.join(candidateDir, 'chrome-linux', 'chrome'),
+        path.join(candidateDir, 'chrome-linux64', 'chrome'),
+        path.join(candidateDir, 'chrome-win', 'chrome.exe'),
+        path.join(candidateDir, 'chrome-win64', 'chrome.exe'),
+        path.join(candidateDir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+        path.join(candidateDir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chrome'),
+        path.join(candidateDir, 'chrome', 'chrome'),
+      ];
+
+      for (const nested of nestedCandidates) {
+        if (fs.existsSync(nested)) {
+          found.push(nested);
+        }
+      }
+
+      found.push(...collectExecutablesUnder(candidateDir));
+    } else if (stats.isFile()) {
+      found.push(candidateDir);
+    }
+  }
+
+  return found;
+}
+
+function collectBundledChromium() {
+  const bundled = [];
+  const searchRoots = [
+    path.join(__dirname, 'node_modules', 'puppeteer', '.local-chromium'),
+    path.join(__dirname, 'node_modules', 'puppeteer', '.local-browsers'),
+    path.join(__dirname, 'node_modules', 'puppeteer-core', '.local-chromium'),
+    path.join(__dirname, 'node_modules', 'puppeteer-core', '.local-browsers'),
+  ];
+
+  for (const root of searchRoots) {
+    bundled.push(...collectExecutablesUnder(root));
   }
 
   return bundled;
