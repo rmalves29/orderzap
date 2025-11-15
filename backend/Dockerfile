@@ -2,7 +2,7 @@ FROM node:18-slim
 
 RUN apt-get update \
  && apt-get install -y \
-    chromium \
+    ca-certificates \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -19,7 +19,12 @@ RUN apt-get update \
     libxrandr2 \
     xdg-utils \
     wget \
- && ln -sf /usr/bin/chromium /usr/bin/chromium-browser \
+ && cd /tmp \
+ && wget -O google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+ && apt-get install -y ./google-chrome.deb \
+ && rm google-chrome.deb \
+ && ln -sf /usr/bin/google-chrome /usr/bin/chromium \
+ && ln -sf /usr/bin/google-chrome /usr/bin/chromium-browser \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -29,6 +34,6 @@ RUN npm install
 
 COPY . .
 
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome
 
 CMD ["node", "server-multitenant-clean.js"]
