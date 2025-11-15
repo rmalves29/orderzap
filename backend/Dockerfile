@@ -22,17 +22,13 @@ RUN apt-get update \
  && cd /tmp \
  && wget -O google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
  && apt-get install -y ./google-chrome.deb \
+ && /usr/bin/google-chrome --version \
  && rm google-chrome.deb \
  && ln -sf /usr/bin/google-chrome /usr/bin/chromium \
  && ln -sf /usr/bin/google-chrome /usr/bin/chromium-browser \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-COPY package.json ./
-RUN npm install
-
-COPY . .
 
 ENV \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1 \
@@ -41,5 +37,10 @@ ENV \
     CHROME_BIN=/usr/bin/google-chrome \
     GOOGLE_CHROME_BIN=/usr/bin/google-chrome \
     GOOGLE_CHROME_SHIM=/usr/bin/google-chrome
+
+COPY package.json ./
+RUN npm install
+
+COPY . .
 
 CMD ["node", "server-multitenant-clean.js"]
