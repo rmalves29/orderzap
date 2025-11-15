@@ -31,30 +31,141 @@ const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'wwebjs_auth');
 // 1) PUPPETEER_EXECUTABLE_PATH (recomendado pela Railway)
 // 2) CHROME_PATH (compatibilidade antiga)
 // 3) caminho padrão do Chromium no container
-const chromiumCandidates = [
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  process.env.CHROME_PATH,
-  '/usr/bin/chromium',
-  '/usr/bin/chromium-browser',
+const chromiumEnvVars = [
+  'PUPPETEER_EXECUTABLE_PATH',
+  'CHROME_PATH',
+  'CHROME_BIN',
+  'GOOGLE_CHROME_BIN',
+  'PUPPETEER_CHROME_PATH',
 ];
 
-function resolveChromiumExecutable() {
-  for (const candidate of chromiumCandidates) {
-    if (!candidate) continue;
+const chromiumSystemCandidates = [
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/snap/bin/chromium',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/lib/chromium-browser/chrome',
+  '/app/.cache/ms-playwright/chromium/chrome-linux/chrome',
+];
+
+function collectBundledChromium() {
+  const bundled = [];
+  const puppeteerBase = path.join(__dirname, 'node_modules', 'puppeteer', '.local-chromium');
+  if (!fs.existsSync(puppeteerBase)) {
+    return bundled;
+  }
+
+  for (const platformDir of fs.readdirSync(puppeteerBase)) {
+    const chromiumDir = path.join(puppeteerBase, platformDir);
     try {
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
+      if (!fs.statSync(chromiumDir).isDirectory()) continue;
     } catch (err) {
-      console.warn(`Falha ao verificar ${candidate}:`, err.message);
+      continue;
+    }
+
+    const chromeCandidates = [
+      path.join(chromiumDir, 'chrome-linux', 'chrome'),
+      path.join(chromiumDir, 'chrome-win', 'chrome.exe'),
+      path.join(chromiumDir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+    ];
+
+    for (const candidate of chromeCandidates) {
+      if (fs.existsSync(candidate)) {
+        bundled.push(candidate);
+      }
     }
   }
 
-  const fallback = chromiumCandidates.find(Boolean);
-  if (!fallback) {
-    console.error('Nenhum caminho de Chromium encontrado. Defina PUPPETEER_EXECUTABLE_PATH.');
+  return bundled;
+}
+
+const chromiumCandidates = Array.from(
+  new Set([
+    ...chromiumEnvVars.map((key) => process.env[key]).filter(Boolean),
+    ...collectBundledChromium(),
+    ...chromiumSystemCandidates,
+  ])
+);
+
+function describeCandidate(candidate, diagnostics, origin) {
+  if (!candidate) return null;
+  const entry = { path: candidate, origin };
+  try {
+    const stats = fs.statSync(candidate);
+    entry.type = stats.isDirectory() ? 'directory' : 'file';
+    if (stats.isDirectory()) {
+      entry.status = 'é um diretório';
+      diagnostics.push(entry);
+      return null;
+    }
+
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      entry.status = 'ok';
+      diagnostics.push(entry);
+      return candidate;
+    } catch (accessErr) {
+      entry.status = 'sem permissão de execução';
+      entry.detail = accessErr.message;
+      diagnostics.push(entry);
+      return null;
+    }
+  } catch (err) {
+    entry.status = err.code === 'ENOENT' ? 'não existe' : 'erro ao verificar';
+    entry.detail = err.message;
+    diagnostics.push(entry);
+    return null;
   }
-  return fallback;
+}
+
+function resolveFromPath(diagnostics) {
+  const binaries = ['chromium', 'chromium-browser', 'google-chrome-stable', 'google-chrome'];
+  const PATH = process.env.PATH || '';
+  for (const dir of PATH.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const binary of binaries) {
+      const candidate = path.join(dir, binary);
+      const found = describeCandidate(candidate, diagnostics, 'PATH');
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function formatDiagnostics(diagnostics) {
+  if (!diagnostics.length) return 'nenhum caminho foi analisado';
+  return diagnostics
+    .map((entry) => {
+      const detail = entry.detail ? ` (${entry.detail})` : '';
+      return `- ${entry.path} [${entry.origin}]: ${entry.status}${detail}`;
+    })
+    .join('\n');
+}
+
+function resolveChromiumExecutable() {
+  const diagnostics = [];
+
+  for (const candidate of chromiumCandidates) {
+    const found = describeCandidate(candidate, diagnostics, 'lista');
+    if (found) {
+      console.info('[Chromium] Usando', found);
+      return found;
+    }
+  }
+
+  const pathCandidate = resolveFromPath(diagnostics);
+  if (pathCandidate) {
+    console.info('[Chromium] Encontrado via PATH', pathCandidate);
+    return pathCandidate;
+  }
+
+  const message = formatDiagnostics(diagnostics);
+  console.error(
+    'Nenhum executável do Chromium/Chrome encontrado. Defina PUPPETEER_EXECUTABLE_PATH com um caminho válido.\n' +
+      message
+  );
+  return null;
 }
 
 const PUPPETEER_EXECUTABLE_PATH = resolveChromiumExecutable();
