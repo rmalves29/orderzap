@@ -34,6 +34,12 @@ RUN npm install
 
 COPY . .
 
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome
+ENV \
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1 \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome \
+    CHROME_PATH=/usr/bin/google-chrome \
+    CHROME_BIN=/usr/bin/google-chrome \
+    GOOGLE_CHROME_BIN=/usr/bin/google-chrome \
+    GOOGLE_CHROME_SHIM=/usr/bin/google-chrome
 
 CMD ["node", "server-multitenant-clean.js"]
