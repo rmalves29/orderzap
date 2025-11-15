@@ -57,17 +57,39 @@ const chromiumSystemCandidates = [
   '/app/.cache/ms-playwright/chromium/chrome-linux/chrome',
 ];
 
-function collectExecutablesUnder(baseDir) {
-  const found = [];
+function collectExecutablesUnder(baseDir, visited = new Set()) {
   if (!fs.existsSync(baseDir)) {
-    return found;
+    return [];
   }
 
-  for (const entry of fs.readdirSync(baseDir)) {
-    const candidateDir = path.join(baseDir, entry);
+  let realBase;
+  try {
+    realBase = fs.realpathSync(baseDir);
+  } catch (err) {
+    return [];
+  }
+
+  if (visited.has(realBase)) {
+    return [];
+  }
+  visited.add(realBase);
+
+  const results = [];
+  const seen = new Set();
+  const executableBasenames = new Set(['chrome', 'chrome.exe']);
+
+  const pushUnique = (candidate) => {
+    if (!candidate) return;
+    if (seen.has(candidate)) return;
+    seen.add(candidate);
+    results.push(candidate);
+  };
+
+  for (const entry of fs.readdirSync(realBase)) {
+    const candidatePath = path.join(realBase, entry);
     let stats;
     try {
-      stats = fs.lstatSync(candidateDir);
+      stats = fs.lstatSync(candidatePath);
     } catch (err) {
       continue;
     }
@@ -78,28 +100,30 @@ function collectExecutablesUnder(baseDir) {
 
     if (stats.isDirectory()) {
       const nestedCandidates = [
-        path.join(candidateDir, 'chrome-linux', 'chrome'),
-        path.join(candidateDir, 'chrome-linux64', 'chrome'),
-        path.join(candidateDir, 'chrome-win', 'chrome.exe'),
-        path.join(candidateDir, 'chrome-win64', 'chrome.exe'),
-        path.join(candidateDir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
-        path.join(candidateDir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chrome'),
-        path.join(candidateDir, 'chrome', 'chrome'),
+        path.join(candidatePath, 'chrome-linux', 'chrome'),
+        path.join(candidatePath, 'chrome-linux64', 'chrome'),
+        path.join(candidatePath, 'chrome-win', 'chrome.exe'),
+        path.join(candidatePath, 'chrome-win64', 'chrome.exe'),
+        path.join(candidatePath, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+        path.join(candidatePath, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chrome'),
+        path.join(candidatePath, 'chrome', 'chrome'),
       ];
 
       for (const nested of nestedCandidates) {
         if (fs.existsSync(nested)) {
-          found.push(nested);
+          pushUnique(nested);
         }
       }
 
-      found.push(...collectExecutablesUnder(candidateDir));
-    } else if (stats.isFile()) {
-      found.push(candidateDir);
+      for (const nested of collectExecutablesUnder(candidatePath, visited)) {
+        pushUnique(nested);
+      }
+    } else if (stats.isFile() && executableBasenames.has(path.basename(candidatePath))) {
+      pushUnique(candidatePath);
     }
   }
 
-  return found;
+  return results;
 }
 
 function collectBundledChromium() {
@@ -115,7 +139,7 @@ function collectBundledChromium() {
     bundled.push(...collectExecutablesUnder(root));
   }
 
-  return bundled;
+  return Array.from(new Set(bundled));
 }
 
 const chromiumCandidates = Array.from(
