@@ -1,7 +1,10 @@
-@@ -5,28 +5,28 @@ RUN apt-get update && apt-get install -y \
+DO nó: 18-slim 
+
+EXECUTE apt-get update && apt-get install -y \ 
+ cromo\ 
     fonts-liberation \
     libasound2 \
-    libatk-bridge2.0-0 \
+ libatk-ponte2.0-0 \ 
     libatk1.0-0 \
     libcups2 \
     libdbus-1-3 \
@@ -15,16 +18,16 @@
     libxrandr2 \
     xdg-utils \
     wget \
+ && ln -sf /usr/bin/chromium /usr/bin/chromium-browser \
  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /app 
 
-COPY package.json ./
-RUN npm install
+CÓPIA package.json ./ 
+EXECUTE npm install 
 
-COPY . .
+CÓPIA . . .  
 
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium 
 
-CMD ["node", "server-multitenant-clean.js"]
+CMD ["nó", "server-multitenant-clean.js"] 
