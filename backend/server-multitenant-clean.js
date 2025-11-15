@@ -10,6 +10,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
+import { spawnSync } from 'child_process';
 
 const { Client, LocalAuth } = whatsappWeb;
 
@@ -164,9 +165,33 @@ function describeCandidate(candidate, diagnostics, origin) {
 
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
+      const versionResult = spawnSync(candidate, ['--version'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 8000,
+      });
+
+      if (versionResult.error) {
+        entry.status = 'falha ao executar --version';
+        entry.detail = versionResult.error.message;
+        diagnostics.push(entry);
+        return null;
+      }
+
+      if (versionResult.status !== 0) {
+        entry.status = 'falha ao executar --version';
+        entry.detail = (versionResult.stderr || versionResult.stdout || '').trim();
+        diagnostics.push(entry);
+        return null;
+      }
+
+      const version = (versionResult.stdout || versionResult.stderr || '').trim();
       entry.status = 'ok';
+      if (version) {
+        entry.version = version;
+      }
       diagnostics.push(entry);
-      return candidate;
+      return entry;
     } catch (accessErr) {
       entry.status = 'sem permissão de execução';
       entry.detail = accessErr.message;
@@ -199,7 +224,14 @@ function formatDiagnostics(diagnostics) {
   if (!diagnostics.length) return 'nenhum caminho foi analisado';
   return diagnostics
     .map((entry) => {
-      const detail = entry.detail ? ` (${entry.detail})` : '';
+      const detailParts = [];
+      if (entry.version) {
+        detailParts.push(entry.version);
+      }
+      if (entry.detail) {
+        detailParts.push(entry.detail);
+      }
+      const detail = detailParts.length ? ` (${detailParts.join(' | ')})` : '';
       return `- ${entry.path} [${entry.origin}]: ${entry.status}${detail}`;
     })
     .join('\n');
@@ -211,14 +243,16 @@ function resolveChromiumExecutable() {
   for (const candidate of chromiumCandidates) {
     const found = describeCandidate(candidate, diagnostics, 'lista');
     if (found) {
-      console.info('[Chromium] Usando', found);
+      const versionSuffix = found.version ? ` (${found.version})` : '';
+      console.info('[Chromium] Usando', `${found.path}${versionSuffix}`);
       return found;
     }
   }
 
   const pathCandidate = resolveFromPath(diagnostics);
   if (pathCandidate) {
-    console.info('[Chromium] Encontrado via PATH', pathCandidate);
+    const versionSuffix = pathCandidate.version ? ` (${pathCandidate.version})` : '';
+    console.info('[Chromium] Encontrado via PATH', `${pathCandidate.path}${versionSuffix}`);
     return pathCandidate;
   }
 
@@ -230,13 +264,16 @@ function resolveChromiumExecutable() {
   return null;
 }
 
-const PUPPETEER_EXECUTABLE_PATH = resolveChromiumExecutable();
+const resolvedChromium = resolveChromiumExecutable();
 
-if (!PUPPETEER_EXECUTABLE_PATH) {
+if (!resolvedChromium) {
   throw new Error(
     'Não foi possível localizar o executável do Chromium. Configure a variável PUPPETEER_EXECUTABLE_PATH.'
   );
 }
+
+const PUPPETEER_EXECUTABLE_PATH = resolvedChromium.path;
+const PUPPETEER_EXECUTABLE_VERSION = resolvedChromium.version;
 
 process.env.PUPPETEER_EXECUTABLE_PATH = PUPPETEER_EXECUTABLE_PATH;
 if (!process.env.CHROME_PATH) {
@@ -444,5 +481,6 @@ app.post('/reset/:tenantId', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`API online em :${PORT}`);
   console.log(`Auth dir: ${AUTH_DIR}`);
-  console.log(`Chromium: ${PUPPETEER_EXECUTABLE_PATH}`);
+  const versionInfo = PUPPETEER_EXECUTABLE_VERSION ? ` (${PUPPETEER_EXECUTABLE_VERSION})` : '';
+  console.log(`Chromium: ${PUPPETEER_EXECUTABLE_PATH}${versionInfo}`);
 });
