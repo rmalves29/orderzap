@@ -1,7 +1,4 @@
-FROM node:18-slim
-
-RUN apt-get update && apt-get install -y \
-    chromium \
+@@ -5,28 +5,28 @@ RUN apt-get update && apt-get install -y \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -28,5 +25,6 @@ RUN npm install
 COPY . .
 
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 CMD ["node", "server-multitenant-clean.js"]
