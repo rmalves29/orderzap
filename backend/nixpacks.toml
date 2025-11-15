@@ -2,7 +2,6 @@
 
 [phases.setup]
 aptPkgs = [
-  "chromium",
   "ca-certificates",
   "fonts-liberation",
   "libasound2",
@@ -30,6 +29,13 @@ aptPkgs = [
   "libxrandr2",
   "wget",
   "xdg-utils"
+]
+cmds = [
+  "apt-get update",
+  "wget -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
+  "apt-get install -y /tmp/google-chrome.deb",
+  "/usr/bin/google-chrome --version",
+  "rm /tmp/google-chrome.deb"
 ]
 
 [phases.install]
