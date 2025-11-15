@@ -245,6 +245,10 @@ function resolveChromiumExecutable() {
     if (found) {
       const versionSuffix = found.version ? ` (${found.version})` : '';
       console.info('[Chromium] Usando', `${found.path}${versionSuffix}`);
+      const summary = formatDiagnostics(diagnostics);
+      if (summary) {
+        console.info('[Chromium] Diagnóstico de caminhos analisados:\n' + summary);
+      }
       return found;
     }
   }
@@ -253,6 +257,10 @@ function resolveChromiumExecutable() {
   if (pathCandidate) {
     const versionSuffix = pathCandidate.version ? ` (${pathCandidate.version})` : '';
     console.info('[Chromium] Encontrado via PATH', `${pathCandidate.path}${versionSuffix}`);
+    const summary = formatDiagnostics(diagnostics);
+    if (summary) {
+      console.info('[Chromium] Diagnóstico de caminhos analisados:\n' + summary);
+    }
     return pathCandidate;
   }
 
