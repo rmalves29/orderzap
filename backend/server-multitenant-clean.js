@@ -31,10 +31,39 @@ const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'wwebjs_auth');
 // 1) PUPPETEER_EXECUTABLE_PATH (recomendado pela Railway)
 // 2) CHROME_PATH (compatibilidade antiga)
 // 3) caminho padrão do Chromium no container
-const PUPPETEER_EXECUTABLE_PATH =
-  process.env.PUPPETEER_EXECUTABLE_PATH ||
-  process.env.CHROME_PATH ||
-  '/usr/bin/chromium-browser';
+const chromiumCandidates = [
+  process.env.PUPPETEER_EXECUTABLE_PATH,
+  process.env.CHROME_PATH,
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+];
+
+function resolveChromiumExecutable() {
+  for (const candidate of chromiumCandidates) {
+    if (!candidate) continue;
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch (err) {
+      console.warn(`Falha ao verificar ${candidate}:`, err.message);
+    }
+  }
+
+  const fallback = chromiumCandidates.find(Boolean);
+  if (!fallback) {
+    console.error('Nenhum caminho de Chromium encontrado. Defina PUPPETEER_EXECUTABLE_PATH.');
+  }
+  return fallback;
+}
+
+const PUPPETEER_EXECUTABLE_PATH = resolveChromiumExecutable();
+
+if (!PUPPETEER_EXECUTABLE_PATH) {
+  throw new Error(
+    'Não foi possível localizar o executável do Chromium. Configure a variável PUPPETEER_EXECUTABLE_PATH.'
+  );
+}
 
 fs.ensureDirSync(AUTH_DIR);
 
