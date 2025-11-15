@@ -36,6 +36,7 @@ const chromiumEnvVars = [
   'CHROME_PATH',
   'CHROME_BIN',
   'GOOGLE_CHROME_BIN',
+  'GOOGLE_CHROME_SHIM',
   'PUPPETEER_CHROME_PATH',
 ];
 
@@ -174,6 +175,20 @@ if (!PUPPETEER_EXECUTABLE_PATH) {
   throw new Error(
     'Não foi possível localizar o executável do Chromium. Configure a variável PUPPETEER_EXECUTABLE_PATH.'
   );
+}
+
+process.env.PUPPETEER_EXECUTABLE_PATH = PUPPETEER_EXECUTABLE_PATH;
+if (!process.env.CHROME_PATH) {
+  process.env.CHROME_PATH = PUPPETEER_EXECUTABLE_PATH;
+}
+if (!process.env.CHROME_BIN) {
+  process.env.CHROME_BIN = PUPPETEER_EXECUTABLE_PATH;
+}
+if (!process.env.GOOGLE_CHROME_BIN) {
+  process.env.GOOGLE_CHROME_BIN = PUPPETEER_EXECUTABLE_PATH;
+}
+if (!process.env.GOOGLE_CHROME_SHIM) {
+  process.env.GOOGLE_CHROME_SHIM = PUPPETEER_EXECUTABLE_PATH;
 }
 
 fs.ensureDirSync(AUTH_DIR);
